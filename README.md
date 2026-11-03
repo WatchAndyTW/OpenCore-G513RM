@@ -18,7 +18,7 @@ Wi-Fi on the MediaTek MT7922, Bluetooth, the NullMoth NVIDIA driver and a one-cl
 | Touchpad | ELAN 04F3:319B, I2C-HID |
 | Ethernet | Realtek RTL8125 2.5 GbE |
 | SMBIOS | MacBookPro16,4 |
-| OpenCore | 1.0.8 DEBUG build |
+| OpenCore | 1.0.8 RELEASE build |
 
 ## What's in the EFI
 
@@ -44,8 +44,9 @@ How each setting was chosen: [docs/config-notes.md](docs/config-notes.md).
 - **AirDrop, Sidecar, Continuity**: not supported by the MT7922 driver.
 - **Wi-Fi after a warm reboot** (restart, or switching from another OS without powering off): fixed in the bundled
   driver build (v3), but not yet confirmed on this laptop. If Wi-Fi is missing after a restart, see [docs/wifi.md](docs/wifi.md).
-- **OpenCore log files**: the DEBUG build writes `opencore-*.txt` to the EFI partition on every boot (`Misc > Debug > Target` = 67).
-  Set Target to 3 to stop it once everything works.
+- **Troubleshooting a boot problem**: the EFI uses the RELEASE build of OpenCore, which logs almost nothing. To get a
+  boot log, swap in the DEBUG build of OpenCore 1.0.8 (OpenCore.efi, BOOTx64.efi, Drivers) and set `Misc > Debug > Target`
+  to 67, which writes `opencore-*.txt` to the EFI partition.
 
 ## BIOS settings
 

@@ -4,7 +4,8 @@ Why `EFI/OC/config.plist` looks the way it does. Everything here was tried on th
 
 ## Base
 
-- Built from OpenCore 1.0.8 `Sample.plist` (DEBUG build) and the AMD_Vanilla patch set. The four
+- Built from OpenCore 1.0.8 `Sample.plist` and the AMD_Vanilla patch set; RELEASE build since 2026-11-04
+  (`Misc > Debug`: Target 3, AppleDebug off, ApplePanic on so kernel panics are still saved to the EFI partition). The four
   `cpuid_cores_per_package` patches are set to **8** cores (6900HX). The byte after the `B8`/`BA` opcode holds the core count.
 - **Booter > DevirtualiseMmio = true**: without it boot.efi fails with `EB.MM.AKM Err(0xE)` and then `STOP 0x16`.
 - **Booter > ResizeAppleGpuBars = 0** and **UEFI > ResizeGpuBars = -1**: the RTX 3060 BAR1 is 8 GB with Resizable BAR on.

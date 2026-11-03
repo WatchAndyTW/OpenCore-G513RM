@@ -95,6 +95,22 @@ PY
     fi
 }
 
+pflat() {  # pflat <plist>: one "key.path = value" line per leaf, for diffs
+    # macOS: python3 only if the Command Line Tools are installed (otherwise /usr/bin/python3 pops up an installer)
+    if [ "$OS" = Darwin ] && ! xcode-select -p >/dev/null 2>&1; then plutil -p "$1"; return; fi
+    python3 -I - "$1" <<'PY'
+import base64, plistlib, sys
+def w(v, p):
+    if isinstance(v, dict):
+        for k in v: w(v[k], p + "." + k if p else k)
+    elif isinstance(v, list):
+        for i, x in enumerate(v): w(x, "%s.%d" % (p, i))
+    else:
+        print("%s = %r" % (p, base64.b64encode(v).decode() if isinstance(v, bytes) else v))
+w(plistlib.load(open(sys.argv[1], "rb")), "")
+PY
+}
+
 # ---------------------------------------------------------------- 1. is this a G513RM?
 check_model() {
     local ok=0 what=""
@@ -184,7 +200,10 @@ summary() {  # summary <old OC dir> <new OC dir>
     local ob nb; ob=$(pget "$old/config.plist" "NVRAM.Add.$G.boot-args"); nb=$(pget "$new/config.plist" "NVRAM.Add.$G.boot-args")
     [ "$ob" = "$nb" ] && say "boot-args: unchanged" || { say "boot-args (installed): $ob"; say "boot-args (new):       $nb"; }
     if cmp -s "$old/config.plist" "$new/config.plist"; then say "config.plist: identical"
-    else say "config.plist: differs (serials kept; compare with: diff <(plutil -p OLD) <(plutil -p NEW) on macOS)"; fi
+    else
+        say "config.plist changes (< installed, > new):"
+        diff <(pflat "$old/config.plist") <(pflat "$new/config.plist") | grep '^[<>]' | head -40 | sed 's/^/  /' || true
+    fi
     cmp -s "$old/OpenCore.efi" "$new/OpenCore.efi" && say "OpenCore.efi: same" || say "OpenCore.efi: different build"
 }
 

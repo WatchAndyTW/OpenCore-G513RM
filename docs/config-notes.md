@@ -86,4 +86,5 @@ the 680M's firmware framebuffer, so IONDRVSupport must stay. Switch with
 The RTX 3060 Laptop is in the driver's device table. Sleep/wake with the driver is not verified on this laptop; the
 boot-arg `-nvrmnopm` disables the driver's sleep support.
 
-Kept for debugging: `-v keepsyms=1 debug=0x100 -lilubetaall -amfipassbeta`.
+Kept for debugging: `keepsyms=1 debug=0x100 -lilubetaall -amfipassbeta`. Verbose boot (`-v`) was removed on 2026-11-04;
+to see boot text again, add `-v` to boot-args or hold Cmd+V while picking macOS in OpenCore.

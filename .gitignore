@@ -1,0 +1,11 @@
+# build output (src/wifi/build.sh)
+/build/
+# OpenCore DEBUG logs and EFI backups, if copied here
+opencore-*.txt
+OC-backup/
+G513RM-EFI-backups/
+# local tool state / macOS litter
+.omc/
+.DS_Store
+._*
+*.log

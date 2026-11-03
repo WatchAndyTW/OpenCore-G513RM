@@ -1,0 +1,549 @@
+diff --git a/AirportMtkWlan/AirportItlwmSkywalkInterface.hpp b/AirportMtkWlan/AirportItlwmSkywalkInterface.hpp
+index 455a130..f4b187b 100644
+--- a/AirportMtkWlan/AirportItlwmSkywalkInterface.hpp
++++ b/AirportMtkWlan/AirportItlwmSkywalkInterface.hpp
+@@ -53,7 +53,12 @@ public:
+     IOReturn setINTERFACE_SETTING(apple80211_interface_setting*) override { return kIOReturnUnsupported; }
+     IOReturn setBYPASS_TX_POWER_CAP(apple80211_bypass_tx_power_cap*) override { return kIOReturnUnsupported; }
+     IOReturn setFACETIME_WIFICALLING_PARAMS(apple80211_facetime_wificalling_params*) override { return kIOReturnUnsupported; }
+-    IOReturn setIPV4_PARAMS(apple80211_ipv4_params*) override { return kIOReturnUnsupported; }
++    // airportd sends IPV4_PARAMS after DHCP once the card advertises ARP/NDP
++    // offload (capability bit 40). The family hands them to WCL
++    // (IO80211Glue::sendIOUCToWcl) before calling us; that is how WCL learns
++    // "ipv4 valid" and skips 802.1X "EAP Mitigation" (forced reassociation).
++    // Nothing to program in this hardware: accept them.
++    IOReturn setIPV4_PARAMS(apple80211_ipv4_params*) override { return kIOReturnSuccess; }
+     IOReturn setWCL_WNM_OPS(apple80211_wcl_wnm_config_t*) override { return kIOReturnUnsupported; }
+     IOReturn setWCL_WNM_OFFLOAD(apple80211_wcl_wnm_offload_t*) override { return kIOReturnUnsupported; }
+     IOReturn setWCL_LIMITED_AGGREGATION(apple80211_limited_aggregation_config*) override { return kIOReturnUnsupported; }
+@@ -443,6 +448,7 @@ private:
+     IOReturn leaveWCLNetwork();
+     void finishWCLScan(IOReturn);
+     void finishWCLJoin(uint16_t, uint16_t, IOReturn);
++    void notifyWCLSupplicantDone(const char *);
+     void publishWCLBeacon(const ieee80211_node *, const uint8_t *, size_t);
+     IOTimerEventSource *joinTimer;
+     uint8_t joinBSSID[6];
+diff --git a/AirportMtkWlan/AirportItlwmV2.cpp b/AirportMtkWlan/AirportItlwmV2.cpp
+index 8f268c7..5311dbe 100644
+--- a/AirportMtkWlan/AirportItlwmV2.cpp
++++ b/AirportMtkWlan/AirportItlwmV2.cpp
+@@ -699,6 +699,9 @@ setLinkStatus(UInt32 status, const IONetworkMedium * activeMedium, UInt64 speed,
+     currentStatus = status;
+     if (fNetIf) {
+         if (status & kIONetworkLinkActive) {
++#ifdef AIRPORT_WCL
++            enterpriseDataPathOpen = false; // the real link now owns the data path
++#endif
+ #ifdef __PRIVATE_SPI__
+             bsdInterface->startOutputThread();
+ #endif
+@@ -717,6 +720,33 @@ setLinkStatus(UInt32 status, const IONetworkMedium * activeMedium, UInt64 speed,
+     return ret;
+ }
+ 
++#ifdef AIRPORT_WCL
++void AirportItlwm::
++setEnterpriseDataPath(bool open)
++{
++    if (!bsdInterface || open == enterpriseDataPathOpen)
++        return;
++    if (!open && (currentStatus & kIONetworkLinkActive)) {
++        enterpriseDataPathOpen = false;
++        return;
++    }
++    XYLog("%s %s\n", __FUNCTION__, open ? "open (802.1X at association)" : "closed");
++    enterpriseDataPathOpen = open;
++    if (open) {
++#ifdef __PRIVATE_SPI__
++        bsdInterface->startOutputThread();
++#endif
++        bsdInterface->setLinkState(kIO80211NetworkLinkUp);
++    } else {
++#ifdef __PRIVATE_SPI__
++        bsdInterface->stopOutputThread();
++        bsdInterface->flushOutputQueue();
++#endif
++        bsdInterface->setLinkState(kIO80211NetworkLinkDown);
++    }
++}
++#endif
++
+ IOReturn AirportItlwm::
+ setLinkStateGated(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3)
+ {
+@@ -819,6 +849,16 @@ UInt32 AirportItlwm::enqueuePacket(mbuf_t m)
+ {
+     auto ic = fHalService->get80211Controller();
+     auto ifp = &ic->ic_ac.ac_if;
++    if (ic->ic_wcl_enterprise && m && mbuf_type(m) != MBUF_TYPE_FREE &&
++        mbuf_len(m) >= sizeof(ether_header_t) &&
++        ((ether_header_t *)mbuf_data(m))->ether_type == htons(ETHERTYPE_PAE)) {
++        static int eapTxLogged;
++        if (eapTxLogged < 64) {
++            eapTxLogged++;
++            XYLog("%s EAPOL tx from host len=%zu state=%d\n", __FUNCTION__,
++                  (size_t)mbuf_pkthdr_len(m), ic->ic_state);
++        }
++    }
+     if (ic->ic_state == IEEE80211_S_RUN && ifp->if_snd.queue &&
+         m && mbuf_type(m) != MBUF_TYPE_FREE && (mbuf_flags(m) & MBUF_PKTHDR) &&
+         ifp->if_snd.queue->lockEnqueue(m))
+@@ -1038,7 +1078,14 @@ getCARD_CAPABILITIES(OSObject *object,
+     cd->capabilities[0] = (caps & IEEE80211_C_RSN) ?
+         (1 << APPLE80211_CAP_AES_CCM) | (1 << APPLE80211_CAP_TKIP) : 0;
+     cd->capabilities[1] &= ~(1 << (APPLE80211_CAP_WPA1 - 8));
+-    cd->capabilities[5] = 0x40; // Scan completion events.
++    // 0x40: scan completion events.
++    // 0x01 (bit 40): ARP/NDP offload. airportd's _processIPv4Changes skips
++    // programming IPv4 into the driver without it ("ARP/NDP offloads disabled,
++    // not programming the offload"), so WCL never learns the DHCP address and,
++    // on 802.1X networks, starts "EAP Mitigation" 10 s after connecting. With it
++    // airportd sends IPV4_PARAMS, which the family forwards to WCL first;
++    // OFFLOAD_ARP/NDP stay unsupported (airportd only logs that).
++    cd->capabilities[5] = 0x40 | 0x01;
+     cd->capabilities[2] = (1 << (APPLE80211_CAP_WME - 16)) |
+         (1 << (APPLE80211_CAP_SHORT_GI_40MHZ - 16)) |
+         (1 << (APPLE80211_CAP_SHORT_GI_20MHZ - 16));
+@@ -1432,6 +1479,29 @@ void AirportItlwm::setPowerStateOff()
+     pmPolicyMaker->acknowledgeSetPowerState();
+ }
+ 
++/*
++ * Restart / power off: reset the card so the next OS (or this one after a
++ * warm reboot) gets it in a clean state. The M.2 slot keeps power.
++ */
++IOReturn AirportItlwm::shutdownGated(OSObject *target, void *, void *, void *, void *)
++{
++    AirportItlwm *self = OSDynamicCast(AirportItlwm, target);
++
++    if (self && self->fHalService)
++        self->fHalService->shutdown();
++    return kIOReturnSuccess;
++}
++
++void AirportItlwm::systemWillShutdown(IOOptionBits specifier)
++{
++    XYLog("%s specifier=0x%x\n", __FUNCTION__, specifier);
++    if ((specifier == kIOMessageSystemWillRestart ||
++         specifier == kIOMessageSystemWillPowerOff) &&
++        fHalService && _fCommandGate)
++        _fCommandGate->runAction(&AirportItlwm::shutdownGated);
++    super::systemWillShutdown(specifier);
++}
++
+ void AirportItlwm::setPowerStateOn()
+ {
+     XYLog("%s\n", __FUNCTION__);
+diff --git a/AirportMtkWlan/AirportItlwmV2.hpp b/AirportMtkWlan/AirportItlwmV2.hpp
+index 0a111af..66c61c0 100644
+--- a/AirportMtkWlan/AirportItlwmV2.hpp
++++ b/AirportMtkWlan/AirportItlwmV2.hpp
+@@ -229,6 +229,9 @@ public:
+     virtual IOReturn setWakeOnMagicPacket( bool active ) override;
+     void setPowerStateOff(void);
+     void setPowerStateOn(void);
++    virtual void systemWillShutdown(IOOptionBits specifier) override;
++    static IOReturn shutdownGated(OSObject *target, void *arg0, void *arg1,
++                                  void *arg2, void *arg3);
+     void unregistPM();
+     bool initPCIPowerManagment(IOPCIDevice *provider);
+ 
+@@ -262,6 +265,13 @@ public:
+     u_int32_t current_authtype_upper;
+     UInt64 currentSpeed;
+     UInt32 currentStatus;
++#ifdef AIRPORT_WCL
++    // 802.1X: open the BSD data path at association so eapolclient's EAP frames can flow
++    // before the four-way handshake brings the link up (net80211 still drops non-EAPOL
++    // traffic while the port is not valid).
++    void setEnterpriseDataPath(bool open);
++    bool enterpriseDataPathOpen = false;
++#endif
+     bool disassocIsVoluntary;
+     char geo_location_cc[3];
+     
+diff --git a/AirportMtkWlan/WCL/WCL.cpp b/AirportMtkWlan/WCL/WCL.cpp
+index ba9ab3d..270aa3c 100644
+--- a/AirportMtkWlan/WCL/WCL.cpp
++++ b/AirportMtkWlan/WCL/WCL.cpp
+@@ -590,6 +590,7 @@ void AirportItlwmSkywalkInterface::finishWCLJoin(uint16_t status, uint16_t reaso
+     joinTimer->cancelTimeout();
+     instance->postMessage(this, AirportWCL::ConnectComplete, &event, sizeof(event), true);
+     if (status) {
++        instance->setEnterpriseDataPath(false);
+         portAuthorized = false;
+         updateWCLLinkQuality(true);
+         ieee80211com *ic = fHalService->get80211Controller();
+@@ -612,6 +613,7 @@ void AirportItlwmSkywalkInterface::wclJoinTimeout(OSObject *owner, IOTimerEventS
+ IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
+ {
+     ieee80211com *ic = fHalService->get80211Controller();
++    instance->setEnterpriseDataPath(false);
+     portAuthorized = false;
+     updateWCLLinkQuality(true);
+     joinPending = false;
+@@ -643,6 +645,22 @@ IOReturn AirportItlwmSkywalkInterface::abortWCLJoin()
+     return kIOReturnSuccess;
+ }
+ 
++// net80211 ran the 802.1X four-way (and group key) handshake with the PMK that
++// eapolclient installed. Tell IO80211/WCL, as a firmware supplicant would:
++// otherwise WCLNetManager::assocTimerAction leaves the network ("4wayHsTimeout")
++// about 15 s after association even though data is flowing.
++void AirportItlwmSkywalkInterface::notifyWCLSupplicantDone(const char *where)
++{
++    ieee80211com *ic = fHalService->get80211Controller();
++    if (!ic->ic_wcl_enterprise || !portAuthorized || !wclLinkIndicated)
++        return;
++    AirportWCL::SupplicantEventData event = {};
++    event.status = 0;
++    XYLog("WCL 802.1X supplicant done (%s): posting supplicant event %u\n",
++          where, (unsigned)AirportWCL::SupplicantEvent);
++    instance->postMessage(this, AirportWCL::SupplicantEvent, &event, sizeof(event), true);
++}
++
+ void AirportItlwmSkywalkInterface::handleWCLLink(bool up)
+ {
+     if (wclStopping)
+@@ -658,6 +676,8 @@ void AirportItlwmSkywalkInterface::handleWCLLink(bool up)
+     }
+     if (up && joinPending && firstBeaconNotified)
+         finishWCLJoin(0, 0, kIOReturnSuccess);
++    if (up)
++        notifyWCLSupplicantDone("link up");
+     updateWCLLinkQuality(true);
+ }
+ 
+@@ -780,8 +800,12 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
+                 wclLinkIndicated = true;
+                 instance->postMessage(this, AirportWCL::LinkStatus, &link, sizeof(link), true);
+                 instance->postMessage(this, AirportWCL::FirstBeacon, &event, sizeof(event), true);
+-                if (portAuthorized)
++                if (portAuthorized) {
+                     finishWCLJoin(0, 0, kIOReturnSuccess);
++                    // Handshake finished before the first beacon: WCL armed its
++                    // four-way deadline with the LinkStatus above, clear it now.
++                    notifyWCLSupplicantDone("first beacon");
++                }
+             }
+             break;
+         }
+@@ -805,9 +829,12 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
+                 instance->postMessage(this, AirportWCL::AssocComplete, &event, sizeof(event), true);
+                 if (event.status)
+                     finishWCLJoin(event.status, 0, kIOReturnError);
++                else if (ic->ic_wcl_enterprise)
++                    instance->setEnterpriseDataPath(true);
+             }
+             break;
+         case IEEE80211_EVT_STA_DEAUTH: {
++            instance->setEnterpriseDataPath(false);
+             portAuthorized = false;
+             updateWCLLinkQuality(true);
+             AirportWCL::DeauthEvent event = {};
+diff --git a/AirportMtkWlan/WCL/WCL.hpp b/AirportMtkWlan/WCL/WCL.hpp
+index 44a5d21..736ce12 100644
+--- a/AirportMtkWlan/WCL/WCL.hpp
++++ b/AirportMtkWlan/WCL/WCL.hpp
+@@ -65,9 +65,31 @@ enum Message : uint32_t {
+     JoinAbortComplete = 214,
+     LinkStatus = 216,
+     LqmUpdate = 39,
++    // apple80211_message_supplicant_event (0x28 bytes). Tahoe IO80211Family:
++    // IO80211InfraInterface::postMessage(76, data, 0x28) calls
++    // handleKeyDone(true, ...) (sets IO80211RSNDone) when status == 0, and WCL's
++    // supplicant-event handler (triggerCcIfNeededOnSupplicantEvent) clears the
++    // NET_MANAGER four-way-handshake deadline. Without it an 802.1X association
++    // (WCL join key = CIPHER_NONE) is torn down ~15 s after association with
++    // "no key/4way hand shake event ... leaving" / reason <4wayHsTimeout>.
++    SupplicantEvent = 76,
+     ScanDone = 237
+ };
+ 
++// Fields read by IO80211Family 1200.13 (macOS 26): +0x4 event code
++// (0xe0822c15 marks a rekey), +0x8 status (0 = success), +0xc flags; WCL writes
++// +0x24 in its own copy. A zeroed event with status 0 means "keys installed".
++struct SupplicantEventData {
++    uint32_t version;
++    uint32_t event;
++    uint32_t status;
++    uint32_t flags;
++    uint8_t reserved[0x28 - 16];
++};
++static_assert(sizeof(SupplicantEventData) == 0x28, "apple80211_message_supplicant_event size");
++static_assert(offsetof(SupplicantEventData, status) == 8, "supplicant event status offset");
++static constexpr uint32_t kSupplicantEventRekey = 0xe0822c15;
++
+ struct SequoiaLqmUpdate {
+     uint8_t rssiValid;
+     uint8_t reserved0[3];
+diff --git a/SimpleMtkWlan/hal_mwx/MtkMwx.cpp b/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
+index 7059149..86d30f8 100644
+--- a/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
++++ b/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
+@@ -2127,6 +2127,8 @@ mwx_intr(void *arg)
+ 	return 1;
+ }
+ 
++#define	MWX_PREINIT_RETRY_COUNT	3
++
+ int
+ mwx_preinit(struct mwx_softc *sc)
+ {
+@@ -2137,9 +2139,19 @@ mwx_preinit(struct mwx_softc *sc)
+ 
+ 	MWX_DEV_LOG(sc, "preinit start fw_loaded=%d\n", sc->sc_fw_loaded);
+ 
+-	if ((rv = mwx_init_hardware(sc)) != 0) {
+-		MWX_DEV_LOG(sc, "preinit hardware init failed error=%d\n", rv);
+-		return rv;
++	/*
++	 * Like Linux mt7921_init_hardware(): a chip left running by the
++	 * previous OS (warm reboot) can miss the first MCU handshake. A failed
++	 * attempt ends with a DMA + WFSYS reset, so just try again.
++	 */
++	for (i = 0; ; i++) {
++		if ((rv = mwx_init_hardware(sc)) == 0)
++			break;
++		MWX_DEV_LOG(sc, "preinit hardware init failed error=%d attempt=%d\n",
++		    rv, i + 1);
++		if (i + 1 >= MWX_PREINIT_RETRY_COUNT)
++			return rv;
++		delay(100 * 1000);
+ 	}
+ 	MWX_DEV_LOG(sc, "preinit hardware init ok\n");
+ 
+@@ -4355,6 +4367,19 @@ mwx_load_firmware(struct mwx_softc *sc)
+ 	    buflen, fwlen);
+ 
+ 	rv = mwx_mcu_patch_sem_ctrl(sc, 1);
++	if (rv == -1) {
++		/*
++		 * PATCH_IS_DL: warm reboot. The M.2 card kept power, and the ROM
++		 * patch the previous OS loaded survives the WFSYS reset. Like
++		 * Linux mt76_connac2_load_patch(), skip it (no semaphore was
++		 * taken, so none is released) and download only the WM firmware.
++		 * Treating this as an error left the card without firmware after
++		 * every warm reboot.
++		 */
++		MWX_DEV_LOG(sc, "patch already downloaded (warm boot), loading WM only\n");
++		rv = 0;
++		goto wm;
++	}
+ 	if (rv != 0) {
+ 		MWX_DEV_LOG(sc, "patch semaphore acquire failed error=%d\n", rv);
+ 		goto fail;
+@@ -4438,6 +4463,7 @@ out:
+ 	if (rv != 0)
+ 		goto fail;
+ 
++wm:
+ 	if (fwlen < sizeof(*fwhdr)) {
+ 		MWX_DEV_LOG(sc, "invalid WM firmware size=%zu min=%zu\n",
+ 		    fwlen, sizeof(*fwhdr));
+@@ -5032,9 +5058,19 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
+ 	}
+ 
+ 	req->channel_type = nchan ? 4 : 0;
+-	req->timeout_value = htole16(nchan * 120);
+-	req->channel_min_dwell_time = htole16(120);
+-	req->channel_dwell_time = htole16(120);
++	/*
++	 * A background scan takes the radio off the BSS channel: 120 ms on each
++	 * of 41 channels kept it away ~5 s per full sweep, and airportd asks for
++	 * short scans every ~10 s while associated. Like mt76 for connac2, pass 0
++	 * there so the firmware uses its default channel time; foreground scans
++	 * keep 120 ms for discovery. (luzility/SimpleMtkWlan ace724e)
++	 */
++	{
++		uint16_t dwell = bgscan ? 0 : 120;
++		req->timeout_value = htole16(nchan * dwell);
++		req->channel_min_dwell_time = htole16(dwell);
++		req->channel_dwell_time = htole16(dwell);
++	}
+ 
+ 
+ #ifdef NOTYET
+@@ -6325,6 +6361,22 @@ mt7921_mac_tx_rate_val(struct mwx_softc *sc)
+ 	return (rate & MT_TX_RATE_IDX_MASK) | (mode & MT_TX_RATE_MODE_MASK);
+ }
+ 
++/* Is this 802.11 data frame an EAPOL frame (LLC/SNAP, ethertype 0x888e)? (luzility 110c92c) */
++static int
++mwx_is_eapol(struct mbuf *m, u_int hdrlen)
++{
++	static const uint8_t eapol_llc[8] = {
++		0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8e
++	};
++	uint8_t llc[sizeof(eapol_llc)];
++
++	if (mbuf_pkthdr_len(m) < hdrlen + sizeof(llc))
++		return 0;
++	if (mbuf_copydata(m, hdrlen, sizeof(llc), llc) != 0)
++		return 0;
++	return memcmp(llc, eapol_llc, sizeof(llc)) == 0;
++}
++
+ void
+ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
+     struct ieee80211_node *ni, struct mt76_txwi *txp)
+@@ -6332,19 +6384,25 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
+ 	struct ieee80211com *ic = &sc->sc_ic;
+ 	struct ieee80211_frame *wh;
+ 	uint32_t val;
+-	uint8_t type, subtype, tid = 0;
++	uint8_t fc_type, type, subtype, tid = 0;
+ 	u_int hdrlen;
+ 	int multicast;
+ 
+ 
+ 	wh = mtod(m, struct ieee80211_frame *);
+-	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
+-	type >>= IEEE80211_FC0_TYPE_SHIFT;
++	/*
++	 * fc_type keeps net80211's in-place encoding for comparisons with IEEE80211_FC0_TYPE_*; type/subtype are
++	 * shifted for the TXD fields. Comparing the shifted value with IEEE80211_FC0_TYPE_DATA (0x08) took every
++	 * data frame for management: fixed basic rate (1 Mbit/s CCK on 2.4 GHz, 6 Mbit/s OFDM on 5 GHz) and
++	 * BA_DISABLE on all TX (upload ~1 / ~5 Mbit/s). Same fix as luzility/SimpleMtkWlan 110c92c.
++	 */
++	fc_type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
++	type = fc_type >> IEEE80211_FC0_TYPE_SHIFT;
+ 	subtype = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
+ 	subtype >>= IEEE80211_FC0_SUBTYPE_SHIFT;
+ 	multicast = IEEE80211_IS_MULTICAST(wh->i_addr1);
+ 
+-	if (type == IEEE80211_FC0_TYPE_CTL)
++	if (fc_type == IEEE80211_FC0_TYPE_CTL)
+ 		hdrlen = sizeof(struct ieee80211_frame_min);
+ 	else
+ 		hdrlen = ieee80211_get_hdrlen(wh);
+@@ -6418,7 +6476,9 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
+ 	}
+ #endif
+ 
+-	if (multicast || type != IEEE80211_FC0_TYPE_DATA) {
++	/* Like mt76 with IEEE80211_TX_CTL_USE_MINRATE, keep EAPOL at the basic rate. */
++	if (multicast || fc_type != IEEE80211_FC0_TYPE_DATA ||
++	    mwx_is_eapol(m, hdrlen)) {
+ 		/* Fixed rata is available just for 802.11 txd */
+ 		uint32_t rate, val6;
+ 
+@@ -7824,6 +7884,34 @@ MtkMwx::resume()
+ 	MWX_DEV_LOG(sc, "resume: firmware reload scheduled\n");
+ }
+ 
++/*
++ * System restart / power off. A warm reboot does not power-cycle the M.2
++ * card: without this the next OS (Linux, Windows, or macOS again) finds
++ * the firmware running and the DMA rings pointing at memory this kernel no
++ * longer owns. Do what Linux mt7921e_unregister_device() does: take driver
++ * ownership, stop DMA, WFSYS reset. No MCU commands: nothing here can wait
++ * on the firmware and stall the shutdown.
++ */
++void
++MtkMwx::shutdown()
++{
++	struct mwx_softc *sc = com;
++
++	if (sc == NULL || sc->sc_memh == 0)
++		return;
++	MWX_DEV_LOG(sc, "shutdown: resetting the chip for the next OS lpctl=0x%08x\n",
++	    mwx_read(sc, MT_CONN_ON_LPCTL));
++	sc->sc_suspended = 1;		/* interrupt handler: hands off */
++	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
++	if (mwx_mcu_drv_pmctrl(sc) != 0)
++		MWX_DEV_LOG(sc, "shutdown: driver own failed\n");
++	mwx_dma_disable(sc, 1);
++	if (mwx_wfsys_reset(sc) != 0)
++		MWX_DEV_LOG(sc, "shutdown: WFSYS reset failed\n");
++	sc->sc_fw_loaded = 0;
++	MWX_DEV_LOG(sc, "shutdown: done\n");
++}
++
+ void
+ MtkMwx::debugPoll()
+ {
+diff --git a/SimpleMtkWlan/hal_mwx/MtkMwx.hpp b/SimpleMtkWlan/hal_mwx/MtkMwx.hpp
+index eadcc26..b729bcb 100644
+--- a/SimpleMtkWlan/hal_mwx/MtkMwx.hpp
++++ b/SimpleMtkWlan/hal_mwx/MtkMwx.hpp
+@@ -52,6 +52,7 @@ public:
+     void debugPoll() override;
+     void suspend() override;
+     void resume() override;
++    void shutdown() override;
+     IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
+ 
+     static bool mwx_match(IOPCIDevice *device);
+diff --git a/include/HAL/MtkHalService.hpp b/include/HAL/MtkHalService.hpp
+index 1e0da81..35def74 100644
+--- a/include/HAL/MtkHalService.hpp
++++ b/include/HAL/MtkHalService.hpp
+@@ -70,6 +70,13 @@ public:
+      */
+     virtual void suspend() {}
+     virtual void resume() {}
++
++    /*
++     * System restart / power off, called on the main work loop. The M.2
++     * card keeps power across a warm reboot, so leave it reset (no
++     * firmware, DMA off) for whatever OS boots next.
++     */
++    virtual void shutdown() {}
+     
+     virtual void free() override;
+ 
+diff --git a/mtk80211/compat.cpp b/mtk80211/compat.cpp
+index e0b9ac7..78f6917 100644
+--- a/mtk80211/compat.cpp
++++ b/mtk80211/compat.cpp
+@@ -414,8 +414,10 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
+ 				map->dm_bounce_mem = 0;
+ 				map->dm_bounce_size = 0;
+ 			}
++			/* x86 packet DMA is coherent; keep payload copies in cached RAM. */
+ 			IOBufferMemoryDescriptor *mem =
+-			    alloc_dma_memory(bounce_size, PAGE_SIZE);
++			    alloc_dma_memory(bounce_size, PAGE_SIZE,
++			    kIOMemoryPhysicallyContiguous | kIOMapDefaultCache);
+ 			if (mem == 0)
+ 				return 1;
+ 			map->dm_bounce_mem = mem;
+diff --git a/mtk80211/openbsd/net80211/ieee80211_input.c b/mtk80211/openbsd/net80211/ieee80211_input.c
+index 55cc7c6..13d547d 100644
+--- a/mtk80211/openbsd/net80211/ieee80211_input.c
++++ b/mtk80211/openbsd/net80211/ieee80211_input.c
+@@ -1164,9 +1164,15 @@ ieee80211_enqueue_data(struct ieee80211com *ic, mbuf_t m,
+ #endif
+ #if defined(AIRPORT_WCL)
+             if (ic->ic_wcl_enterprise) {
++                static int eapRxLogged;
+                 mbuf_t eapCopy = NULL;
+                 if (mbuf_dup(m, MBUF_DONTWAIT, &eapCopy) == 0 && eapCopy)
+                     ml_enqueue(ml, eapCopy);
++                if (eapRxLogged < 64) {
++                    eapRxLogged++;
++                    XYLog("%s EAPOL rx to host len=%zu port_valid=%d copied=%d\n", __FUNCTION__,
++                          (size_t)mbuf_pkthdr_len(m), ni->ni_port_valid, eapCopy != NULL);
++                }
+             }
+             ieee80211_eapol_key_input(ic, m, ni);
+ #elif defined(USE_APPLE_SUPPLICANT)
+diff --git a/tests/scan/generate.rb b/tests/scan/generate.rb
+index b934e46..d5456ec 100644
+--- a/tests/scan/generate.rb
++++ b/tests/scan/generate.rb
+@@ -64,8 +64,10 @@ int main(){
+   check(captured.seq_num==0,"sequence wrap");
+   check(captured.channels_num==std::min(n,32u),"primary channel count");
+   check(captured.ext_channels_num==(n>32?std::min(n,64u)-32:0),"extra channel count");
+-  check(captured.timeout_value==std::min(n,64u)*120,"timeout");
+-  check(captured.channel_dwell_time==120 && captured.channel_min_dwell_time==120,"dwell");
++  // Background scans leave the channel time to the firmware (0); foreground scans dwell 120 ms.
++  const unsigned dwell=bg?0:120;
++  check(captured.timeout_value==std::min(n,64u)*dwell,"timeout");
++  check(captured.channel_dwell_time==dwell && captured.channel_min_dwell_time==dwell,"dwell");
+   check(captured.channel_type==(n?4:0),"channel type");
+   check(captured.ssid_type==1 && captured.ssid_type_ext==0 && captured.ssids_num==0,"SSID mode");
+   check(captured.version==1 && captured.scan_type==0 && captured.probe_req_num==0,"scan mode");

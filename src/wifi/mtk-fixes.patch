@@ -279,10 +279,28 @@ index 44a5d21..736ce12 100644
      uint8_t rssiValid;
      uint8_t reserved0[3];
 diff --git a/SimpleMtkWlan/hal_mwx/MtkMwx.cpp b/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
-index 7059149..86d30f8 100644
+index 7059149..555b4ff 100644
 --- a/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
 +++ b/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
-@@ -2127,6 +2127,8 @@ mwx_intr(void *arg)
+@@ -743,7 +743,8 @@ int	mwx_mcu_wait_resp_msg(struct mwx_softc *, uint32_t, int,
+ 
+ int		mwx_dma_disable(struct mwx_softc *sc, int force);
+ void		mwx_dma_enable(struct mwx_softc *sc);
+-int		mwx_pci_flr(struct mwx_softc *, IOPCIDevice *);
++int		mwx_pci_sbr(struct mwx_softc *, IOPCIDevice *);
++void		mwx_pci_log_state(struct mwx_softc *, IOPCIDevice *, const char *);
+ static void	mwx_node_chan_width(struct ieee80211_node *, uint8_t *, uint8_t *);
+ int		mwx_ampdu_rx_start(struct ieee80211com *, struct ieee80211_node *,
+ 		    uint8_t);
+@@ -755,6 +756,7 @@ void		mwx_ampdu_tx_stop(struct ieee80211com *, struct ieee80211_node *,
+ 		    uint8_t);
+ int		mwx_mcu_fw_pmctrl(struct mwx_softc *);
+ int		mwx_mcu_drv_pmctrl(struct mwx_softc *);
++int		mwx_mcu_take_own(struct mwx_softc *);
+ int		mwx_wfsys_reset(struct mwx_softc *sc);
+ uint32_t	mwx_reg_addr(struct mwx_softc *, uint32_t);
+ int		mwx_init_hardware(struct mwx_softc *);
+@@ -2127,6 +2129,8 @@ mwx_intr(void *arg)
  	return 1;
  }
  
@@ -291,7 +309,7 @@ index 7059149..86d30f8 100644
  int
  mwx_preinit(struct mwx_softc *sc)
  {
-@@ -2137,9 +2139,19 @@ mwx_preinit(struct mwx_softc *sc)
+@@ -2137,9 +2141,19 @@ mwx_preinit(struct mwx_softc *sc)
  
  	MWX_DEV_LOG(sc, "preinit start fw_loaded=%d\n", sc->sc_fw_loaded);
  
@@ -314,7 +332,216 @@ index 7059149..86d30f8 100644
  	}
  	MWX_DEV_LOG(sc, "preinit hardware init ok\n");
  
-@@ -4355,6 +4367,19 @@ mwx_load_firmware(struct mwx_softc *sc)
+@@ -2261,7 +2275,7 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
+ 	pci_intr_handle_t ih;
+ 	pcireg_t memtype;
+ 	uint32_t hwid, hwrev;
+-	int error;
++	int error, rv;
+ 
+ 	MWX_DEV_LOG(sc, "attach start pci_id=0x%08x vendor=0x%04x product=0x%04x\n",
+ 	    pa->pa_id, PCI_VENDOR(pa->pa_id), PCI_PRODUCT(pa->pa_id));
+@@ -2296,26 +2310,28 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
+ 	MWX_DEV_LOG(sc, "attach interrupt mapped source=%s\n",
+ 	    pci_intr_string(pa->pa_pc, ih));
+ 
+-	if (mwx_mcu_fw_pmctrl(sc) != 0 ||
+-	    mwx_mcu_drv_pmctrl(sc) != 0) {
++	mwx_pci_log_state(sc, pa->pa_tag, "attach state");
++	if ((rv = mwx_mcu_take_own(sc)) != 0) {
+ 		/*
+-		 * A warm reboot does not power-cycle the M.2 card, so the chip
+-		 * can be left wedged by the previous OS session. Try to recover
+-		 * instead of failing: WFSYS reset first, then a PCIe FLR.
++		 * The card keeps standby power across a restart, and on this
++		 * laptop also across a shutdown, so the chip can be left
++		 * refusing the ownership handshake by the previous session.
++		 * Try to recover instead of failing: WFSYS reset first, then a
++		 * hot reset of the PCIe link (never FLR, see mwx_pci_sbr()).
+ 		 */
+-		MWX_DEV_LOG(sc, "attach MCU power control failed lpctl=0x%08x, "
+-		    "trying WFSYS reset\n", mwx_read(sc, MT_CONN_ON_LPCTL));
+-		mwx_wfsys_reset(sc);
+-		if (mwx_mcu_fw_pmctrl(sc) != 0 ||
+-		    mwx_mcu_drv_pmctrl(sc) != 0) {
+-			MWX_DEV_LOG(sc, "still failing lpctl=0x%08x, trying PCIe FLR\n",
+-			    mwx_read(sc, MT_CONN_ON_LPCTL));
+-			if (mwx_pci_flr(sc, pa->pa_tag) != 0 ||
+-			    mwx_mcu_fw_pmctrl(sc) != 0 ||
+-			    mwx_mcu_drv_pmctrl(sc) != 0) {
+-				MWX_DEV_LOG(sc, "attach MCU power control failed after "
+-				    "recovery lpctl=0x%08x\n",
+-				    mwx_read(sc, MT_CONN_ON_LPCTL));
++		mwx_pci_log_state(sc, pa->pa_tag, rv == 1 ?
++		    "attach firmware own failed, trying WFSYS reset" :
++		    "attach driver own failed, trying WFSYS reset");
++		if (mwx_wfsys_reset(sc) != 0)
++			MWX_DEV_LOG(sc, "attach recovery WFSYS reset timed out\n");
++		if ((rv = mwx_mcu_take_own(sc)) != 0) {
++			mwx_pci_log_state(sc, pa->pa_tag, rv == 1 ?
++			    "still no firmware own, trying PCIe bus reset" :
++			    "still no driver own, trying PCIe bus reset");
++			if (mwx_pci_sbr(sc, pa->pa_tag) != 0 ||
++			    (rv = mwx_mcu_take_own(sc)) != 0) {
++				mwx_pci_log_state(sc, pa->pa_tag,
++				    "attach MCU power control failed after recovery");
+ 				goto fail;
+ 			}
+ 		}
+@@ -4001,35 +4017,115 @@ mwx_dma_enable(struct mwx_softc *sc)
+ }
+ 
+ /*
+- * PCIe Function Level Reset: resets the whole function like a power cycle.
+- * Config space (BARs, command, MSI) is saved and restored around it.
++ * The root port (or switch port) above the card, or NULL.
++ */
++#define	MWX_PCI_BRIDGE_CONTROL	0x3e	/* type 1 header: Bridge Control */
++
++static IOPCIDevice *
++mwx_pci_upstream_port(IOPCIDevice *dev)
++{
++	IORegistryEntry *p;
++	IOPCIDevice *bridge;
++
++	for (p = dev->getParentEntry(gIOServicePlane); p != NULL;
++	    p = p->getParentEntry(gIOServicePlane)) {
++		if ((bridge = OSDynamicCast(IOPCIDevice, p)) != NULL)
++			return bridge;
++	}
++	return NULL;
++}
++
++/*
++ * One line for the log: what the card and its root port look like. LPCTL
++ * 0xffffffff means MMIO itself is dead (link down or config lost), anything
++ * else means the chip answers but its power-management handshake doesn't.
++ */
++void
++mwx_pci_log_state(struct mwx_softc *sc, IOPCIDevice *dev, const char *when)
++{
++	IOPCIDevice *bridge;
++	UInt8 cap = 0;
++	UInt16 lnksta = 0xffff;
++
++	if (dev == NULL)
++		return;
++	bridge = mwx_pci_upstream_port(dev);
++	if (bridge != NULL &&
++	    bridge->findPCICapability(kIOPCICapabilityIDPCIExpress, &cap) && cap)
++		lnksta = bridge->configRead16(cap + 0x12);
++	MWX_DEV_LOG(sc, "%s: lpctl=0x%08x chipid=0x%08x cmd=0x%04x vendor=0x%04x "
++	    "port_lnksta=0x%04x\n", when, mwx_read(sc, MT_CONN_ON_LPCTL),
++	    mwx_read(sc, MT_HW_CHIPID), dev->configRead16(kIOPCIConfigCommand),
++	    dev->configRead16(kIOPCIConfigVendorID), lnksta);
++}
++
++/*
++ * PCIe Secondary Bus Reset through the root port above the card: a hot
++ * reset of the link, the closest thing to PERST# a driver can do. Config
++ * space (BARs, command, MSI) is saved and restored around it.
++ *
++ * Not FLR: the MT7922 advertises FLR but it is broken. After an FLR every
++ * config read returns ~0 and the card stays dead until it loses power
++ * (Linux: "PCI: Avoid FLR for Mediatek MT7922 WiFi", quirk_no_flr; the
++ * kernel falls back to this bus reset, which works). The FLR this driver
++ * used to try at boot turned a chip that only refused the ownership
++ * handshake into one that needed a full power-off.
+  */
+ int
+-mwx_pci_flr(struct mwx_softc *sc, IOPCIDevice *dev)
++mwx_pci_sbr(struct mwx_softc *sc, IOPCIDevice *dev)
+ {
++	IOPCIDevice *bridge;
+ 	UInt8 cap = 0;
+-	UInt32 devcap;
+-	UInt16 devctl;
++	UInt16 flags, ctl, vendor = 0xffff;
++	UInt32 slotcap;
++	int i;
+ 
+-	if (dev == NULL ||
+-	    !dev->findPCICapability(kIOPCICapabilityIDPCIExpress, &cap) ||
+-	    cap == 0) {
+-		MWX_DEV_LOG(sc, "FLR: no PCIe capability\n");
++	if (dev == NULL || (bridge = mwx_pci_upstream_port(dev)) == NULL) {
++		MWX_DEV_LOG(sc, "SBR: no upstream port\n");
+ 		return ENODEV;
+ 	}
+-	devcap = dev->configRead32(cap + 0x04);
+-	if (!(devcap & (1U << 28))) {
+-		MWX_DEV_LOG(sc, "FLR: not supported devcap=0x%08x\n", devcap);
++	if (!bridge->findPCICapability(kIOPCICapabilityIDPCIExpress, &cap) ||
++	    cap == 0) {
++		MWX_DEV_LOG(sc, "SBR: upstream port has no PCIe capability\n");
+ 		return ENODEV;
+ 	}
++	flags = bridge->configRead16(cap + 0x02);
++	if (flags & (1U << 8)) {		/* slot implemented */
++		slotcap = bridge->configRead32(cap + 0x14);
++		if (slotcap & (1U << 6)) {	/* hot-plug capable */
++			/*
++			 * A hot-plug port would report the reset as a
++			 * surprise removal and IOPCIFamily would tear the
++			 * device down under us.
++			 */
++			MWX_DEV_LOG(sc, "SBR: skipped, hot-plug port slotcap=0x%08x\n",
++			    slotcap);
++			return ENODEV;
++		}
++	}
++
+ 	dev->saveDeviceState();
+-	devctl = dev->configRead16(cap + 0x08);
+-	dev->configWrite16(cap + 0x08, devctl | (1U << 15));
+-	IOSleep(150);
++	ctl = bridge->configRead16(MWX_PCI_BRIDGE_CONTROL);
++	bridge->configWrite16(MWX_PCI_BRIDGE_CONTROL, ctl | 0x0040);
++	IOSleep(2);
++	bridge->configWrite16(MWX_PCI_BRIDGE_CONTROL, ctl & ~0x0040);
++	/* PCIe: 100 ms before the first config request after a reset. */
++	IOSleep(100);
++	for (i = 0; i < 20; i++) {
++		vendor = dev->configRead16(kIOPCIConfigVendorID);
++		if (vendor != 0xffff)
++			break;
++		IOSleep(50);
++	}
++	if (vendor == 0xffff) {
++		MWX_DEV_LOG(sc, "SBR: card did not come back\n");
++		return EIO;
++	}
+ 	dev->restoreDeviceState();
+ 	dev->setMemoryEnable(true);
+ 	dev->setBusMasterEnable(true);
+-	MWX_DEV_LOG(sc, "FLR done vendor=0x%04x\n", dev->configRead16(0));
++	MWX_DEV_LOG(sc, "SBR done vendor=0x%04x after %d ms\n", vendor,
++	    102 + i * 50);
+ 	return 0;
+ }
+ 
+@@ -4074,6 +4170,20 @@ mwx_mcu_drv_pmctrl(struct mwx_softc *sc)
+ 	return 0;
+ }
+ 
++/*
++ * Linux mt7921_pci_probe(): firmware own, then driver own. Returns 0, or
++ * which half of the handshake failed (1 firmware own, 2 driver own).
++ */
++int
++mwx_mcu_take_own(struct mwx_softc *sc)
++{
++	if (mwx_mcu_fw_pmctrl(sc) != 0)
++		return 1;
++	if (mwx_mcu_drv_pmctrl(sc) != 0)
++		return 2;
++	return 0;
++}
++
+ int
+ mwx_wfsys_reset(struct mwx_softc *sc)
+ {
+@@ -4355,6 +4465,19 @@ mwx_load_firmware(struct mwx_softc *sc)
  	    buflen, fwlen);
  
  	rv = mwx_mcu_patch_sem_ctrl(sc, 1);
@@ -334,7 +561,7 @@ index 7059149..86d30f8 100644
  	if (rv != 0) {
  		MWX_DEV_LOG(sc, "patch semaphore acquire failed error=%d\n", rv);
  		goto fail;
-@@ -4438,6 +4463,7 @@ out:
+@@ -4438,6 +4561,7 @@ out:
  	if (rv != 0)
  		goto fail;
  
@@ -342,7 +569,7 @@ index 7059149..86d30f8 100644
  	if (fwlen < sizeof(*fwhdr)) {
  		MWX_DEV_LOG(sc, "invalid WM firmware size=%zu min=%zu\n",
  		    fwlen, sizeof(*fwhdr));
-@@ -5032,9 +5058,19 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
+@@ -5032,9 +5156,19 @@ mt7921_mcu_hw_scan(struct mwx_softc *sc, int bgscan)
  	}
  
  	req->channel_type = nchan ? 4 : 0;
@@ -365,7 +592,7 @@ index 7059149..86d30f8 100644
  
  
  #ifdef NOTYET
-@@ -6325,6 +6361,22 @@ mt7921_mac_tx_rate_val(struct mwx_softc *sc)
+@@ -6325,6 +6459,22 @@ mt7921_mac_tx_rate_val(struct mwx_softc *sc)
  	return (rate & MT_TX_RATE_IDX_MASK) | (mode & MT_TX_RATE_MODE_MASK);
  }
  
@@ -388,7 +615,7 @@ index 7059149..86d30f8 100644
  void
  mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
      struct ieee80211_node *ni, struct mt76_txwi *txp)
-@@ -6332,19 +6384,25 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
+@@ -6332,19 +6482,25 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
  	struct ieee80211com *ic = &sc->sc_ic;
  	struct ieee80211_frame *wh;
  	uint32_t val;
@@ -418,7 +645,7 @@ index 7059149..86d30f8 100644
  		hdrlen = sizeof(struct ieee80211_frame_min);
  	else
  		hdrlen = ieee80211_get_hdrlen(wh);
-@@ -6418,7 +6476,9 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
+@@ -6418,7 +6574,9 @@ mt7921_mac_write_txwi_80211(struct mwx_softc *sc, struct mbuf *m,
  	}
  #endif
  
@@ -429,17 +656,63 @@ index 7059149..86d30f8 100644
  		/* Fixed rata is available just for 802.11 txd */
  		uint32_t rate, val6;
  
-@@ -7824,6 +7884,34 @@ MtkMwx::resume()
+@@ -7789,7 +7947,7 @@ MtkMwx::suspend()
+ 
+ /*
+  * System wake: take the chip back from the firmware (with the same WFSYS
+- * reset / PCIe FLR fallback as attach), then reload the firmware through
++ * reset / PCIe bus reset fallback as attach), then reload the firmware through
+  * the hard reset task (the DMA stall recovery path). An interface that was
+  * up is brought up again by that task; one the front end took down (the
+  * native Wi-Fi interface) is initialized when it is enabled again.
+@@ -7801,17 +7959,17 @@ MtkMwx::resume()
+ 
+ 	if (sc == NULL || !sc->sc_suspended)
+ 		return;
+-	MWX_DEV_LOG(sc, "resume lpctl=0x%08x\n", mwx_read(sc, MT_CONN_ON_LPCTL));
+-	if (mwx_mcu_fw_pmctrl(sc) != 0 || mwx_mcu_drv_pmctrl(sc) != 0) {
++	mwx_pci_log_state(sc, pci != NULL ? pci->pa_tag : NULL, "resume state");
++	if (mwx_mcu_take_own(sc) != 0) {
+ 		MWX_DEV_LOG(sc, "resume: driver own failed, trying WFSYS reset\n");
+ 		mwx_wfsys_reset(sc);
+-		if ((mwx_mcu_fw_pmctrl(sc) != 0 || mwx_mcu_drv_pmctrl(sc) != 0) &&
+-		    pci != NULL && pci->pa_tag != NULL) {
+-			MWX_DEV_LOG(sc, "resume: trying PCIe FLR\n");
+-			if (mwx_pci_flr(sc, pci->pa_tag) == 0) {
+-				mwx_mcu_fw_pmctrl(sc);
+-				mwx_mcu_drv_pmctrl(sc);
+-			}
++		if (mwx_mcu_take_own(sc) != 0 && pci != NULL && pci->pa_tag != NULL) {
++			mwx_pci_log_state(sc, pci->pa_tag,
++			    "resume: still no driver own, trying PCIe bus reset");
++			if (mwx_pci_sbr(sc, pci->pa_tag) == 0 &&
++			    mwx_mcu_take_own(sc) != 0)
++				mwx_pci_log_state(sc, pci->pa_tag,
++				    "resume: driver own failed after bus reset");
+ 		}
+ 	}
+ 	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+@@ -7824,6 +7982,48 @@ MtkMwx::resume()
  	MWX_DEV_LOG(sc, "resume: firmware reload scheduled\n");
  }
  
 +/*
-+ * System restart / power off. A warm reboot does not power-cycle the M.2
-+ * card: without this the next OS (Linux, Windows, or macOS again) finds
-+ * the firmware running and the DMA rings pointing at memory this kernel no
-+ * longer owns. Do what Linux mt7921e_unregister_device() does: take driver
-+ * ownership, stop DMA, WFSYS reset. No MCU commands: nothing here can wait
-+ * on the firmware and stall the shutdown.
++ * System restart / power off. The M.2 card keeps standby power across a
++ * restart and, on this laptop, often across a shutdown too, so the next
++ * boot (macOS, Linux or Windows) finds the chip in whatever state we leave.
++ *
++ * Leave it the way Linux mt7921_pci_suspend() does, a state the firmware
++ * is built to sit in while powered: interrupts masked, DMA stopped,
++ * ownership handed back to the firmware (SET_OWN), and bus mastering off so
++ * the card cannot DMA into memory the next OS owns. The firmware keeps
++ * running; the next attach takes the chip back, WFSYS-resets it and gets
++ * PATCH_IS_DL, which mwx_load_firmware() handles.
++ *
++ * v3 did a WFSYS reset here and left the chip in driver own with no
++ * firmware. Every boot where Wi-Fi then failed (2026-11-04, three times)
++ * followed a clean shutdown that ran it; the chip refused the ownership
++ * handshake on the next boot. No MCU commands: nothing here can wait on the
++ * firmware and stall the shutdown.
 + */
 +void
 +MtkMwx::shutdown()
@@ -448,17 +721,21 @@ index 7059149..86d30f8 100644
 +
 +	if (sc == NULL || sc->sc_memh == 0)
 +		return;
-+	MWX_DEV_LOG(sc, "shutdown: resetting the chip for the next OS lpctl=0x%08x\n",
++	MWX_DEV_LOG(sc, "shutdown: quiescing the chip for the next OS lpctl=0x%08x\n",
 +	    mwx_read(sc, MT_CONN_ON_LPCTL));
 +	sc->sc_suspended = 1;		/* interrupt handler: hands off */
 +	mwx_write(sc, MT_WFDMA0_HOST_INT_ENA, 0);
++	mwx_write(sc, MT_PCIE_MAC_INT_ENABLE, 0);
 +	if (mwx_mcu_drv_pmctrl(sc) != 0)
 +		MWX_DEV_LOG(sc, "shutdown: driver own failed\n");
 +	mwx_dma_disable(sc, 1);
-+	if (mwx_wfsys_reset(sc) != 0)
-+		MWX_DEV_LOG(sc, "shutdown: WFSYS reset failed\n");
++	if (mwx_mcu_fw_pmctrl(sc) != 0)
++		MWX_DEV_LOG(sc, "shutdown: firmware own failed\n");
++	if (pci != NULL && pci->pa_tag != NULL)
++		pci->pa_tag->setBusMasterEnable(false);
 +	sc->sc_fw_loaded = 0;
-+	MWX_DEV_LOG(sc, "shutdown: done\n");
++	MWX_DEV_LOG(sc, "shutdown: done lpctl=0x%08x\n",
++	    mwx_read(sc, MT_CONN_ON_LPCTL));
 +}
 +
  void

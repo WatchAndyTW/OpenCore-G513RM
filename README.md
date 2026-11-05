@@ -26,7 +26,7 @@ Wi-Fi on the MediaTek MT7922, Bluetooth, the NullMoth NVIDIA driver and a one-cl
 |---|---|
 | Base | Lilu, VirtualSMC, SMCBatteryManager, ECEnabler, RestrictEvents, NVMeFix, AMD_Vanilla kernel patches (8 cores) + Tahoe 26.4+ time-panic fix |
 | CPU power management, sensors | AMDRyzenCPUPowerManagement + SMCAMDProcessor 0.7.2f1 |
-| Wi-Fi | AirportMtkWlan 1.5.0 (SimpleMtkWlan) + this repo's fixes: WPA2-Enterprise / eduroam, warm-reboot firmware load ([docs/wifi.md](docs/wifi.md)) |
+| Wi-Fi | AirportMtkWlan 1.5.0 (SimpleMtkWlan) + this repo's fixes: WPA2-Enterprise / eduroam, warm-reboot / standby-power recovery ([docs/wifi.md](docs/wifi.md)) |
 | Bluetooth | BlueToolFixup + SimpleMtkBtFw / SimpleMtkBtPatcher 1.1.0 |
 | Keyboard, touchpad | VoodooPS2Controller (keyboard only), VoodooI2C + VoodooI2CHID |
 | ASUS keys, fans, backlight, brightness | AsusSMC, BrightnessKeys, SSDT-PNLF |
@@ -42,8 +42,10 @@ How each setting was chosen: [docs/config-notes.md](docs/config-notes.md).
 
 - **Radeon 680M**: no macOS driver.
 - **AirDrop, Sidecar, Continuity**: not supported by the MT7922 driver.
-- **Wi-Fi after a warm reboot** (restart, or switching from another OS without powering off): fixed in the bundled
-  driver build (v3), but not yet confirmed on this laptop. If Wi-Fi is missing after a restart, see [docs/wifi.md](docs/wifi.md).
+- **Wi-Fi missing after a restart or shutdown** (the M.2 card keeps standby power, so the chip isn't reset): the
+  bundled driver build (v4) no longer uses the chip's broken PCIe FLR and leaves the chip in a clean state at shutdown.
+  Not yet confirmed on this laptop. Install the log agent (`sh tools/mtklog-autosave.sh --install`) so a failed boot
+  leaves a log, and see [docs/wifi.md](docs/wifi.md).
 - **Troubleshooting a boot problem**: the EFI uses the RELEASE build of OpenCore, which logs almost nothing. To get a
   boot log, swap in the DEBUG build of OpenCore 1.0.8 (OpenCore.efi, BOOTx64.efi, Drivers) and set `Misc > Debug > Target`
   to 67, which writes `opencore-*.txt` to the EFI partition.
@@ -122,6 +124,7 @@ scripts/install.sh       installer used by Install.command; also runs on Linux
 tools/
   wifi-verify.sh         Wi-Fi join timeline (802.1X key events, IPv4) from the system log
   mtklog.sh              the Wi-Fi driver's own log (works even when the driver failed to start)
+  mtklog-autosave.sh     login agent that saves that log every boot, so a failed boot can be diagnosed later
   nvidia-oc-config.sh    Linux: NVIDIA settings / panel mode in the installed config
   bin/                   ocvalidate, macserial (OpenCore 1.0.8 utilities) for macOS and Linux
 src/

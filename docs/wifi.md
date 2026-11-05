@@ -31,9 +31,28 @@ is no MAC address, so the Wi-Fi controller stopped about 2.5 s into boot and mac
 
 - `PATCH_IS_DL`: skip the patch and load only the WM firmware, as Linux `mt76_connac2_load_patch()` does.
 - Hardware init is retried up to 3 times. Each failed attempt ends with a DMA + WFSYS reset.
-- On restart / shutdown (`systemWillShutdown`) the driver takes ownership of the chip, stops DMA and resets WFSYS, so
-  the next OS finds a clean chip. This hook only writes registers and sends no firmware commands, so it can't stall
-  shutdown.
+
+**Wi-Fi dead after a restart *or* shutdown** (v4, 2026-11-05). Status: built, not yet confirmed on this laptop.
+
+v3 still lost Wi-Fi on 3 boots on 2026-11-04 (19:45, 20:00, 21:25). Each one followed a clean Shut Down or Restart,
+and every forced power-off was followed by a good boot. The M.2 card on this laptop keeps standby power across a
+shutdown too, not just a restart. In each failed boot the IOPCIFamily log shows the same thing: the chip refused the
+host/firmware ownership handshake (`LPCTL`) at attach, the driver fell through WFSYS reset to a PCIe FLR about 2.2 s into
+boot, and the controller was torn down at 2.7 s. These failures never reached the patch download, so `PATCH_IS_DL`
+was not involved. Fixes:
+
+- **No more FLR.** The MT7922 advertises Function-Level Reset but it is broken: afterwards every config read returns
+  all ones and the card stays dead until it loses power. Linux never FLRs this chip (`quirk_no_flr`, "PCI: Avoid FLR
+  for Mediatek MT7922 WiFi") and falls back to a Secondary Bus Reset, which works. The driver now does the same, a hot
+  reset of the link through the root port above the card (`GPP5`). It is skipped on hot-plug ports.
+- **Shutdown hook.** v3 left the chip in driver ownership, freshly WFSYS-reset, with no firmware. That's an unusual
+  state, and every failed boot followed a shutdown that ran this hook. v4 leaves the chip the way Linux suspend does:
+  interrupts masked, DMA stopped, ownership handed back to the firmware, and PCI bus mastering off so the card can't
+  DMA into the next OS's memory. The firmware keeps running, and the next boot takes the chip back and loads WM only
+  (`PATCH_IS_DL`).
+- **Logging.** On attach and at every recovery step the driver logs `lpctl`, `chipid`, the PCI command register,
+  the vendor ID and the root port's link status. `lpctl=0xffffffff` means MMIO itself is dead, and any other value
+  means the chip answers but won't hand over.
 
 ## Checking it
 
@@ -47,6 +66,17 @@ A good 802.1X join reads, in order: `JOIN 8021X` → `supplicant done (driver)` 
 
 After a warm reboot, `tools/mtklog.sh` should show `patch already downloaded (warm boot), loading WM only` and then
 `firmware loaded and ready`. If Wi-Fi is missing after a restart, run `tools/mtklog.sh` **before** rebooting again.
-The macOS system log has nothing from the driver, and its own log is lost on the next boot.
+The macOS system log has nothing from the driver, its own log is lost on the next boot, and it is a ring buffer
+that overwrites the boot-time lines after about 10 minutes of use.
+
+To keep it automatically, install the login agent once:
+
+```sh
+sh tools/mtklog-autosave.sh --install     # no sudo; --uninstall removes it
+```
+
+At every login it saves the log to `~/Library/Logs/AirportMtkWlan/boot-<boot time>.log` and keeps the newest 30.
+If the Wi-Fi controller didn't start, the file name ends in `-FAILED` and a notification appears. The lines that
+matter are `attach state:`, `... trying WFSYS reset`, `... trying PCIe bus reset` and `SBR done` / `SBR: ...`.
 
 In Windows, turn off Fast Startup, which otherwise leaves the card half-initialised.

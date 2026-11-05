@@ -7,7 +7,7 @@
 #
 # Upstream: flxxxxddd/SimpleMtkWlan v1.5.0 (commit 9a9c2ea, GPL-2.0), Debug build for macOS Tahoe (26), plus
 #   - mtk-fixes.patch: 802.1X / WPA2-Enterprise fixes, TX rate + DMA fixes (upstream PRs 1 and 2), shorter background
-#     scans, and the warm-reboot fixes (see docs/wifi.md)
+#     scans, and the warm-reboot / standby-power fixes (see docs/wifi.md)
 #   - firmware/*.bin: MT7922 firmware from linux-firmware 20260724, embedded with gen_fwbinary.py
 # Then run scripts/install.sh to install the updated EFI.
 set -euo pipefail

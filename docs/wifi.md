@@ -21,6 +21,15 @@ Rebuild it with `bash src/wifi/build.sh`.
 - Data frames are no longer sent at the basic rate when Block Ack is off (upstream PR #1).
 - DMA uses cached packet bounce buffers (upstream PR #2).
 - Background scans use the firmware's default dwell time per channel instead of 120 ms.
+- **Noise floor** (2026-11-05). The driver reported 0 dBm noise, so macOS saw e.g. RSSI -43 dBm / noise 0 dBm, an
+  SNR of -43 dB on an excellent link. macOS's link-quality and roaming logic run on that SNR (and macOS was scanning
+  2.4 GHz every 12-100 s while connected on 5 GHz). The firmware doesn't measure noise, so the driver now reports the
+  thermal noise floor for the channel width: -94 / -91 / -88 dBm at 20 / 40 / 80 MHz.
+- **Upload latency** (2026-11-05). The driver kept its own unmanaged FIFO of up to 2048 frames between macOS and the
+  256-slot TX ring, which defeats macOS's AQM (FQ-CoDel). `networkQuality` measured 3.7 s of uplink delay under load.
+  The FIFO is now 256 frames, so the backlog waits in macOS's managed queue.
+- Not changed yet: the firmware always gets the world regulatory domain (`00`) and a fixed 20 dBm per-rate power cap.
+  Per-country power (the firmware's CLC tables, as Linux loads them) is not implemented.
 
 **Warm reboot** (v3, 2026-11-03). Status: built, not yet confirmed on this laptop.
 

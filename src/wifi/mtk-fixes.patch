@@ -279,7 +279,7 @@ index 44a5d21..736ce12 100644
      uint8_t rssiValid;
      uint8_t reserved0[3];
 diff --git a/SimpleMtkWlan/hal_mwx/MtkMwx.cpp b/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
-index 7059149..555b4ff 100644
+index 7059149..e5b63e6 100644
 --- a/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
 +++ b/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
 @@ -743,7 +743,8 @@ int	mwx_mcu_wait_resp_msg(struct mwx_softc *, uint32_t, int,
@@ -656,7 +656,40 @@ index 7059149..555b4ff 100644
  		/* Fixed rata is available just for 802.11 txd */
  		uint32_t rate, val6;
  
-@@ -7789,7 +7947,7 @@ MtkMwx::suspend()
+@@ -7407,10 +7565,31 @@ MtkMwx::getFirmwareVersion()
+ 	return com->sc_hwtype == MWX_HW_MT7922 ? "MT7922" : "MT7921";
+ }
+ 
++/*
++ * Noise floor in -dBm (getNOISE() negates it). The firmware doesn't report
++ * one, and 0 here told macOS the noise was 0 dBm: CoreWLAN showed
++ * noise=0 next to rssi=-43, an SNR of -43 dB on a link that is actually
++ * excellent, which macOS's link-quality and roaming logic act on. Report the
++ * thermal noise floor for the channel width instead: -174 dBm/Hz +
++ * 10*log10(bandwidth) + a typical 7 dB receiver noise figure.
++ */
+ int16_t
+ MtkMwx::getBSSNoise()
+ {
+-	return 0;
++	struct ieee80211_node *ni;
++	uint8_t bw, center;
++
++	if (com == NULL || (ni = com->sc_ic.ic_bss) == NULL || ni->ni_chan == NULL)
++		return 94;
++	mwx_node_chan_width(ni, &bw, &center);
++	switch (bw) {
++	case CMD_CBW_80MHZ:
++		return 88;
++	case CMD_CBW_40MHZ:
++		return 91;
++	default:
++		return 94;
++	}
+ }
+ 
+ bool
+@@ -7789,7 +7968,7 @@ MtkMwx::suspend()
  
  /*
   * System wake: take the chip back from the firmware (with the same WFSYS
@@ -665,7 +698,7 @@ index 7059149..555b4ff 100644
   * the hard reset task (the DMA stall recovery path). An interface that was
   * up is brought up again by that task; one the front end took down (the
   * native Wi-Fi interface) is initialized when it is enabled again.
-@@ -7801,17 +7959,17 @@ MtkMwx::resume()
+@@ -7801,17 +7980,17 @@ MtkMwx::resume()
  
  	if (sc == NULL || !sc->sc_suspended)
  		return;
@@ -692,7 +725,7 @@ index 7059149..555b4ff 100644
  		}
  	}
  	mwx_set(sc, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
-@@ -7824,6 +7982,48 @@ MtkMwx::resume()
+@@ -7824,6 +8003,48 @@ MtkMwx::resume()
  	MWX_DEV_LOG(sc, "resume: firmware reload scheduled\n");
  }
  
@@ -787,6 +820,25 @@ index e0b9ac7..78f6917 100644
  			if (mem == 0)
  				return 1;
  			map->dm_bounce_mem = mem;
+diff --git a/mtk80211/openbsd/net80211/ieee80211.c b/mtk80211/openbsd/net80211/ieee80211.c
+index 75ba1f6..9c31cf7 100644
+--- a/mtk80211/openbsd/net80211/ieee80211.c
++++ b/mtk80211/openbsd/net80211/ieee80211.c
+@@ -234,7 +234,13 @@ ieee80211_ifattach(struct _ifnet *ifp, IOEthernetController *controller)
+     struct ieee80211com *ic = (struct ieee80211com *)ifp;
+     
+     ifp->controller = controller;
+-    ifq_init(&ifp->if_snd, ifp, 2048);
++    /*
++     * Keep the driver's own FIFO about one TX ring deep (256 slots). The
++     * backlog then waits in the interface's output queue, where macOS's
++     * AQM (FQ-CoDel) manages it; 2048 frames here sat unmanaged and added
++     * seconds of delay under upload load.
++     */
++    ifq_init(&ifp->if_snd, ifp, 256);
+     memcpy(((struct arpcom *)ifp)->ac_enaddr, ic->ic_myaddr,
+            ETHER_ADDR_LEN);
+     if (ifp->if_sadl) {
 diff --git a/mtk80211/openbsd/net80211/ieee80211_input.c b/mtk80211/openbsd/net80211/ieee80211_input.c
 index 55cc7c6..13d547d 100644
 --- a/mtk80211/openbsd/net80211/ieee80211_input.c

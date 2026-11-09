@@ -27,7 +27,10 @@ Why `EFI/OC/config.plist` looks the way it does. Everything here was tried on th
 
 VoodooPS2Controller with only its keyboard plugin; the PS2 trackpad/mouse plugins are off. The touchpad is I2C-HID
 (ELAN, `\_SB.I2CA.TPD0`) on VoodooI2C + VoodooI2CHID. The GPIO controller is AMD (`\_SB.GPIO`), so there's no
-SSDT-GPI0 and VoodooI2C falls back to polling.
+SSDT-GPI0. VoodooI2C would use the touchpad's AMD GPIO interrupt (pin 91, level-low) through VoodooGPIOAMD, but
+the boot-arg `-vi2c-force-polling` makes it poll instead. In GPIO mode the touchpad stops responding after a few
+seconds idle until a key is pressed. The suspected cause is VoodooGPIOAMD 2.9.1's IRQ handler: its `irq == 0`
+check is always true, so it clears the pin's INTERRUPT_ENABLE after every interrupt, racing the re-enable.
 
 ## USB
 
@@ -74,7 +77,7 @@ AMDRyzenCPUPowerManagement, SMCAMDProcessor.
 Applied by `tools/nvidia-oc-config.sh`, following the driver README and 1401's nullmoth-setup.sh 2.6.4:
 
 - boot-args `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0`
-  plus `nvfbhidpi=1`
+  plus `nvfbhidpi=1`; `-vi2c-force-polling` is for the touchpad (see Keyboard / touchpad)
 - `csr-active-config` = `0x0A43`
 - boot-args and csr-active-config in NVRAM > Delete
 - SecureBootModel Disabled; AMFIPass after Lilu

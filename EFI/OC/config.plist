@@ -719,6 +719,24 @@
 				<key>PlistPath</key>
 				<string>Contents/Info.plist</string>
 			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
+				<string>RyzenHV.kext</string>
+				<key>Comment</key>
+				<string>RyzenHV 0.7.9-beta + g513rm-fixes.patch: AMD SVM for Hypervisor.framework (Docker, src/ryzenhv)</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/RyzenHV</string>
+				<key>MaxKernel</key>
+				<string>25.99.99</string>
+				<key>MinKernel</key>
+				<string>25.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
 		</array>
 		<key>Block</key>
 		<array>
@@ -2036,7 +2054,7 @@
 				AAAAAAAAAAAAAAAAAAA=
 				</data>
 				<key>boot-args</key>
-				<string>keepsyms=1 debug=0x100 -lilubetaall -amfipassbeta nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0 revpatch=sbvmm,cpuname revcpu=1 nvfbhidpi=1 -vi2c-force-polling</string>
+				<string>keepsyms=1 debug=0x100 -lilubetaall -amfipassbeta nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0 revpatch=sbvmm,cpuname revcpu=1 nvfbhidpi=1 -vi2c-force-polling rhv_enable_svm=1 rhv_allow_users=1</string>
 				<key>csr-active-config</key>
 				<data>
 				QwoAAA==

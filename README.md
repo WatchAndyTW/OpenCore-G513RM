@@ -35,6 +35,7 @@ Wi-Fi on the MediaTek MT7922, Bluetooth, the NullMoth NVIDIA driver and a one-cl
 | Ethernet | LucyRTL8125Ethernet |
 | NVIDIA | AMFIPass, boot-args and csr-active-config for the NullMoth driver; IONDRVSupport excluded (dGPU/MUX panel mode) |
 | Boot picker | OpenCanopy (GoldenGate theme) |
+| Docker Desktop (experimental, test on USB first) | RyzenHV 0.7.9-beta + this repo's security fixes: Hypervisor.framework on AMD SVM ([docs/ryzenhv.md](docs/ryzenhv.md)) |
 
 How each setting was chosen: [docs/config-notes.md](docs/config-notes.md).
 
@@ -131,7 +132,8 @@ src/
   acpi/                  SSDT sources (CPUR, EC-USBX, PNLF)
   usbmap/make_utbmap.py  generates the USB map
   wifi/                  driver patch, MT7922 firmware, build.sh (rebuilds AirportMtkWlan.kext)
-docs/                    config notes, Wi-Fi driver notes
+  ryzenhv/               security fixes, build.sh (rebuilds RyzenHV.kext and the Docker shim)
+docs/                    config notes, Wi-Fi driver notes, RyzenHV setup and review
 ```
 
 ## Credits

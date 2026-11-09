@@ -1,6 +1,6 @@
 # Third-party components
 
-This repository redistributes unmodified third-party binaries, plus one modified driver, under their own licences:
+This repository redistributes unmodified third-party binaries, plus two modified drivers, under their own licences:
 
 | Component | Where | Licence |
 |---|---|---|
@@ -18,7 +18,8 @@ This repository redistributes unmodified third-party binaries, plus one modified
 | SimpleMtkBtFw, SimpleMtkBtPatcher 1.1.0 | `EFI/OC/Kexts/` | GPL-3.0, flxxxxddd |
 | AirportMtkWlan (SimpleMtkWlan 1.5.0, **modified**) | `EFI/OC/Kexts/` | GPL-2.0, flxxxxddd. Corresponding source: upstream commit `9a9c2ea` + `src/wifi/mtk-fixes.patch` + `src/wifi/firmware/` (`src/wifi/build.sh` rebuilds it) |
 | MediaTek MT7922 firmware (WIFI_MT7922_patch_mcu_1_1_hdr.bin, WIFI_RAM_CODE_MT7922_1.bin) | `src/wifi/firmware/`, embedded in AirportMtkWlan | MediaTek redistribution licence, as shipped in linux-firmware (`LICENCE.mediatek`, `WHENCE`), build 20260724 |
+| RyzenHV (0.7.9-beta, **modified**) | `EFI/OC/Kexts/` | MIT, Illia Haidai (OverlordDev), licence text in `src/ryzenhv/LICENSE`. Source: upstream commit `99627c6` + `src/ryzenhv/g513rm-fixes.patch` (`src/ryzenhv/build.sh` rebuilds it) |
 | NullMothSafe.efi | `EFI/OC/Tools/` | NullMoth / 1401 project |
 
 The scripts and documentation written for this repository (`Install.command`, `scripts/`, `tools/*.sh`, `src/acpi/`,
-`src/usbmap/`, `src/wifi/build.sh`, `docs/`) may be used freely.
+`src/usbmap/`, `src/wifi/build.sh`, `src/ryzenhv/build.sh`, `docs/`) may be used freely.

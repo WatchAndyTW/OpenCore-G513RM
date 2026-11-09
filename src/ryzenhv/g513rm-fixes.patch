@@ -1,0 +1,185 @@
+diff --git a/kext/Source/RyzenHVUserClient.cpp b/kext/Source/RyzenHVUserClient.cpp
+index 0208388..66bb20a 100644
+--- a/kext/Source/RyzenHVUserClient.cpp
++++ b/kext/Source/RyzenHVUserClient.cpp
+@@ -24,6 +24,7 @@ bool com_overlorddev_RyzenHVUserClient::initWithTask(task_t owningTask, void *se
+     fVmLock  = IOLockAlloc();
+     fIsAdmin = clientHasPrivilege(securityToken, kIOClientPrivilegeAdministrator) ==
+                kIOReturnSuccess;
++    fIsRoot  = fIsAdmin;
+     /*
+      * Parallels (and any other VM app) runs its VM process as the logged-in user, not as root. Boot-arg
+      * rhv_allow_users=1 lets the local console user do what root can: create VMs, map memory, run guests.
+@@ -34,8 +35,9 @@ bool com_overlorddev_RyzenHVUserClient::initWithTask(task_t owningTask, void *se
+             fIsAdmin = clientHasPrivilege(securityToken, kIOClientPrivilegeLocalUser) == kIOReturnSuccess;
+     }
+     /*
+-     * Read-only methods (info, log, stats) are open to everyone. Methods that
+-     * change state or create VMs need root (fIsAdmin).
++     * Info and stats are open to everyone; the log (kernel addresses, guest memory dumps) needs fIsAdmin.
++     * Methods that create or run VMs need fIsAdmin. HvControl changes (native mode, kern.hv_support,
++     * SVM limits, debugging) and the log level need fIsRoot: rhv_allow_users does not extend to them.
+      * TODO(security): decide who may create VMs for real; Docker and friends
+      * run unprivileged.
+      */
+@@ -201,6 +203,10 @@ IOReturn com_overlorddev_RyzenHVUserClient::clientMemoryForType(UInt32 type, IOO
+     if (!me->fIsAdmin)                                                                   \
+         return kIOReturnNotPrivileged
+ 
++#define RHV_ROOT()                                                                       \
++    if (!me->fIsRoot)                                                                    \
++        return kIOReturnNotPrivileged
++
+ /* Takes a reference on the client's VM, or returns kIOReturnNotReady. */
+ #define RHV_RETAIN_VM(vm)                                                                \
+     com_overlorddev_RyzenHVVm *vm;                                                       \
+@@ -226,6 +232,7 @@ IOReturn com_overlorddev_RyzenHVUserClient::sReadLog(OSObject *target, void *,
+                                                      IOExternalMethodArguments *args)
+ {
+     RHV_ME();
++    RHV_ADMIN();
+     /* Fill IOKit's own output buffer directly, 4 KiB is too much for the kernel stack. */
+     rhv::log::read(args->scalarInput[0], (RHVLogChunk *)args->structureOutput);
+     return kIOReturnSuccess;
+@@ -235,7 +242,7 @@ IOReturn com_overlorddev_RyzenHVUserClient::sSetLogLevel(OSObject *target, void
+                                                          IOExternalMethodArguments *args)
+ {
+     RHV_ME();
+-    RHV_ADMIN();
++    RHV_ROOT();
+     if (args->scalarInput[0] > RHV_LOG_TRACE)
+         return kIOReturnBadArgument;
+ 
+@@ -250,7 +257,7 @@ IOReturn com_overlorddev_RyzenHVUserClient::sHvControl(OSObject *target, void *,
+     RHV_ME();
+     uint32_t cmd = (uint32_t)args->scalarInput[0], value = (uint32_t)args->scalarInput[1];
+     if (cmd == kRHVHvDebug || cmd == kRHVHvFlightDump || cmd == kRHVHvReadGuest) {
+-        RHV_ADMIN();
++        RHV_ROOT();
+         if (cmd == kRHVHvDebug)
+             rhv::hv::debugSet(value);
+         else if (cmd == kRHVHvFlightDump)
+@@ -262,7 +269,7 @@ IOReturn com_overlorddev_RyzenHVUserClient::sHvControl(OSObject *target, void *,
+         return kIOReturnSuccess;
+     }
+     if (cmd == kRHVHvSvmLimit || cmd == kRHVHvSvmRescan) {
+-        RHV_ADMIN();
++        RHV_ROOT();
+         uint32_t enabled = 0;
+         if (cmd == kRHVHvSvmLimit ? !rhv::svm::debugLimit(value) : (enabled = rhv::svm::rescan(), false))
+             return kIOReturnBadArgument;
+@@ -271,7 +278,7 @@ IOReturn com_overlorddev_RyzenHVUserClient::sHvControl(OSObject *target, void *,
+         return kIOReturnSuccess;
+     }
+     if (cmd != kRHVHvGet) {
+-        RHV_ADMIN();
++        RHV_ROOT();          /* native mode and kern.hv_support stay root-only even with rhv_allow_users=1 */
+         bool ok = cmd == kRHVHvMode ? rhv::hv::setMode(value)
+                 : cmd == kRHVHvSysctl ? rhv::hv::setSysctl(value != 0)
+                 : cmd == kRHVHvTpr ? rhv::hv::setTprShadow(value != 0) : false;
+diff --git a/kext/Source/RyzenHVUserClient.hpp b/kext/Source/RyzenHVUserClient.hpp
+index f0c7306..308f839 100644
+--- a/kext/Source/RyzenHVUserClient.hpp
++++ b/kext/Source/RyzenHVUserClient.hpp
+@@ -58,7 +58,8 @@ private:
+     com_overlorddev_RyzenHVVm *fVm;
+     IOLock                    *fVmLock;   /* guards the fVm pointer, not the VM itself */
+     task_t                     fTask;
+-    bool                       fIsAdmin;
++    bool                       fIsAdmin;  /* may run VMs: root, or the console user with rhv_allow_users=1 */
++    bool                       fIsRoot;   /* really root: needed for HvControl changes and the log level, whatever the boot-args */
+ };
+ 
+ #endif /* RYZENHV_USERCLIENT_HPP */
+diff --git a/kext/Source/VMCB.hpp b/kext/Source/VMCB.hpp
+index 2c3bd5b..4b9e3fc 100644
+--- a/kext/Source/VMCB.hpp
++++ b/kext/Source/VMCB.hpp
+@@ -192,7 +192,8 @@ enum : uint32_t {
+     V4_SKINIT   = 1u << 6,
+     V4_WBINVD   = 1u << 9,
+     V4_MONITOR  = 1u << 10,
+-    V4_MWAIT    = 1u << 11
++    V4_MWAIT    = 1u << 11,
++    V4_XSETBV   = 1u << 13
+ };
+ 
+ /* control.intCtl */
+diff --git a/kext/Source/Vm.cpp b/kext/Source/Vm.cpp
+index 738ef90..4f45ed6 100644
+--- a/kext/Source/Vm.cpp
++++ b/kext/Source/Vm.cpp
+@@ -474,8 +474,15 @@ IOReturn com_overlorddev_RyzenHVVmShared::protect(uint64_t gpa, uint64_t size, u
+         }
+     }
+     if (rc == kIOReturnSuccess) {
+-        for (uint64_t off = 0; off < size; off += 4096)
+-            fNpt.protect(gpa + off, perm);
++        for (uint64_t off = 0; off < size; off += 4096) {
++            /* A page pinned only for reading (mapDescriptorLocked's read-only fallback) must never become writable:
++             * the guest would write memory the process itself may only read, e.g. the page cache of a read-only file. */
++            uint32_t p = perm;
++            const Backing *b = static_cast<const Backing *>(fNpt.lookup(gpa + off, nullptr, nullptr));
++            if (b && b->dir == kIODirectionOut)
++                p &= ~(uint32_t)rhv::npt::PERM_W;
++            fNpt.protect(gpa + off, p);
++        }
+         RHV_STAT_INC(vmProtects);
+     }
+     IORWLockUnlock(fRw);
+@@ -674,7 +681,8 @@ void com_overlorddev_RyzenHVVm::resetLocked(uint16_t cs, uint16_t ip)
+     c.interceptVec3 = V3_INTR | V3_NMI | V3_SMI | V3_INIT | V3_CPUID | V3_INVD | V3_HLT | V3_IOIO |
+                       V3_MSR | V3_SHUTDOWN;
+     c.interceptVec4 = V4_VMRUN | V4_VMMCALL | V4_VMLOAD | V4_VMSAVE | V4_STGI | V4_CLGI |
+-                      V4_SKINIT | V4_WBINVD | V4_MONITOR | V4_MWAIT;
++                      V4_SKINIT | V4_WBINVD | V4_MONITOR | V4_MWAIT |
++                      V4_XSETBV;                 /* a native XSETBV would change the host's XCR0 (see the restore after VMRUN) */
+     c.iopmBasePa    = fIopm.pa;
+     c.msrpmBasePa   = fMsrpm.pa;
+     c.asid          = 1;                       /* 0 is the host */
+@@ -1028,8 +1036,9 @@ IOReturn com_overlorddev_RyzenHVVm::run(bool skipInstruction, RHVExit *out)
+         }
+ 
+         rhv::fpu::xsave(fGuestFpu.va, guestX);
+-        if (guestX != hostX)
+-            rhv::fpu::xsetbv0(hostX);
++        /* Always: XRSTOR of the host state below faults (#GP with interrupts off, a panic) if XCR0 lacks a component the
++         * host state has, so never trust that the guest left XCR0 at guestX. */
++        rhv::fpu::xsetbv0(hostX);
+         rhv::fpu::xrstor(fHostFpu.va, hostX);
+         /* Self-check: the host state must be bit for bit what it was (this code uses no SSE of its own). */
+         rhv::fpu::xsave(fScratchFpu.va, hostX);
+diff --git a/shim/hv_shim.c b/shim/hv_shim.c
+index 4156a0a..51c034e 100644
+--- a/shim/hv_shim.c
++++ b/shim/hv_shim.c
+@@ -102,18 +102,26 @@ void rhv_shim_init(void)                 /* called by hijack.c, only in the proc
+ __attribute__((constructor)) static void rhv_shim_init(void)
+ #endif
+ {
++    /*
++     * The wrappers export DYLD_INSERT_LIBRARIES for the one process they start. Docker's backend is Docker.app's main
++     * executable, so without this every process it starts (the UI, helpers, CLI plugins, credential helpers) would load
++     * the shim too. The wrappers set the variable again for each HyperKit they start, so nothing that needs it loses it.
++     */
++    unsetenv("DYLD_INSERT_LIBRARIES");
++
+     const char *v = getenv("RYZENHV_TRACE");
+     g_trace = v && *v && *v != '0' ? atoi(v) : 0;      /* 1: every call, 2: only what is not routine I/O, CPUID, MMIO */
+     /*
+      * Trace and statistics cost a lot of host CPU (a line and a flush per exit, tens of thousands of exits a second), so
+-     * they are off unless asked for: the file /tmp/rhv-debug or ~/.ryzenhv/debug turns them on (the wrapper script sets
+-     * RYZENHV_TRACE and RYZENHV_STATS for every run, so the variables alone are not a request).
++     * they are off unless asked for: the file ~/.ryzenhv/debug turns them on (the wrapper script sets RYZENHV_TRACE and
++     * RYZENHV_STATS for every run, so the variables alone are not a request). Not /tmp/rhv-debug: any account can create
++     * that, and tracing logs guest registers and memory.
+      */
+     {
+         char home[1024];
+         const char *h = getenv("HOME");
+         snprintf(home, sizeof(home), "%s/.ryzenhv/debug", h ? h : "/var/empty");
+-        g_quiet = access("/tmp/rhv-debug", F_OK) != 0 && access(home, F_OK) != 0;
++        g_quiet = access(home, F_OK) != 0;
+     }
+     if (g_quiet)
+         g_trace = 0;

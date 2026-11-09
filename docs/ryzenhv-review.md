@@ -47,6 +47,8 @@ exist; `-rhv_off` disables everything.
 
 ## Verdict
 
+Patches 1-4 below and the ReadLog restriction are in `src/ryzenhv/g513rm-fixes.patch`; setup is in [ryzenhv.md](ryzenhv.md).
+
 Not safe to load as published. With `rhv_allow_users=1` (which Docker needs in shim mode), any program the user runs
 gets a ring-0 attack surface that includes finding 1 (0.7.9-beta) and the native-mode switch (finding 2). Native mode
 widens this to every uid (finding 3) for no Docker benefit.

@@ -9,3 +9,6 @@ G513RM-EFI-backups/
 .DS_Store
 ._*
 *.log
+
+# third-party source checked out for review (not vendored)
+/third_party/

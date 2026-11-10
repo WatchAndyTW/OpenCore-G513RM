@@ -10,9 +10,12 @@
 #   1. VmProtect never makes a page writable that was pinned read-only (guest writes into read-only files)
 #   2. HvControl changes (native mode, kern.hv_support, SVM limits, debugging) and the log level need real root,
 #      even with rhv_allow_users=1; reading the log needs the VM privilege
-#   3. the shim unsets DYLD_INSERT_LIBRARIES so it does not spread to every process Docker starts, and no longer
-#      takes /tmp/rhv-debug (world-writable) as a request to trace guest memory
+#   3. the shim unsets DYLD_INSERT_LIBRARIES in every process except Docker's backend (whose "services" process runs the
+#      hypervisor check), so it does not spread through everything Docker starts; the HyperKit wrapper sets it only for
+#      HyperKit; /tmp/rhv-debug (world-writable) no longer switches on guest-memory tracing
 #   4. XSETBV is always intercepted and the host XCR0 is always restored after VMRUN (a guest could panic the host)
+#   5. the Docker installer also sets EngineTypeMac=hyperkit, the setting Docker 4.99 uses instead of
+#      UseVirtualizationFramework
 # The shim (build/ryzenhv/build/libryzenhv.dylib) and rhv-info stay in build/; see docs/ryzenhv.md for Docker.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)

@@ -59,6 +59,8 @@ The least risky route is **shim mode, built from source, with local patches**:
 2. Gate every HvControl command except Get on real root (`kIOClientPrivilegeAdministrator`), regardless of
    `rhv_allow_users`, so native mode can't be switched on at runtime.
 3. `unsetenv("DYLD_INSERT_LIBRARIES")` in the shim's constructor, and only inject into HyperKit and the backend.
+   (As built: the backend's own processes keep it, because Docker 4.99 runs the hypervisor check in the backend's
+   `services` child; see ryzenhv.md.)
 4. Intercept XSETBV in raw mode and restore XCR0 unconditionally after VMRUN.
 5. Optional: restrict ReadLog to admin; cap VmUnmap/VmMap sizes.
 

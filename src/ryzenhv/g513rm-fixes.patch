@@ -149,20 +149,70 @@ index 738ef90..4f45ed6 100644
          rhv::fpu::xrstor(fHostFpu.va, hostX);
          /* Self-check: the host state must be bit for bit what it was (this code uses no SSE of its own). */
          rhv::fpu::xsave(fScratchFpu.va, hostX);
+diff --git a/scripts/docker-desktop-shim.sh b/scripts/docker-desktop-shim.sh
+index 3fc7c12..7c962e4 100755
+--- a/scripts/docker-desktop-shim.sh
++++ b/scripts/docker-desktop-shim.sh
+@@ -15,7 +15,8 @@
+ #   MacOS/com.docker.backend.real            Docker's backend, moved (its signature stays valid)
+ #   MacOS/com.docker.backend                 a wrapper that starts it with the shim loaded: the backend refuses to start unless
+ #                                            hv_vm_create() works
+-#   ~/Library/Group Containers/group.com.docker/settings-store.json   UseVirtualizationFramework=false (use HyperKit)
++#   ~/Library/Group Containers/group.com.docker/settings-store.json   EngineTypeMac=hyperkit (4.99+) and
++#                                            UseVirtualizationFramework=false (older builds): use HyperKit
+ # Two checks in HyperKit (v0.20210107-12-gadc4ea) are patched in memory by the shim, found by the bytes around them:
+ #   1. HyperKit refuses a CPU whose CPUID vendor is not "GenuineIntel": that conditional jump becomes nops.
+ #   2. HyperKit compares the guest linear address of an EPT violation with the one it computes from the instruction; AMD does
+@@ -75,7 +76,8 @@ EOF
+     cat > "$WRAP" <<WRAP
+ #!/bin/bash
+ # RyzenHV wrapper, see scripts/docker-desktop-shim.sh in the ryzen-hypervisor repository.
+-export DYLD_INSERT_LIBRARIES="$LIBDIR/libryzenhv.dylib"
++# DYLD_INSERT_LIBRARIES is set only for HyperKit itself (via env), not for cat/ps/rm/tee started here.
++unset DYLD_INSERT_LIBRARIES
+ # A HyperKit that was killed leaves its pid file behind, and the next one then fails with "Failed to set up pidfile".
+ prev=""
+ for a in "\$@"; do
+@@ -86,7 +88,8 @@ for a in "\$@"; do
+     prev="\$a"
+ done
+ # HyperKit's own messages (Docker's log keeps only its exit code) also go to $OWNER_HOME/.ryzenhv/hyperkit.log
+-exec "\$(dirname "\$0")/com.docker.hyperkit.real" "\$@" 2> >(tee -a "$OWNER_HOME/.ryzenhv/hyperkit.log" >&2)
++exec /usr/bin/env DYLD_INSERT_LIBRARIES="$LIBDIR/libryzenhv.dylib" "\$(dirname "\$0")/com.docker.hyperkit.real" "\$@" \\
++    2> >(tee -a "$OWNER_HOME/.ryzenhv/hyperkit.log" >&2)
+ WRAP
+     chmod 755 "$WRAP"
+     if ! is_script "$BACK"; then
+@@ -104,9 +107,10 @@ WRAP
+     mkdir -p "$(dirname "$SETTINGS")"
+     # plutil cannot write a file that is just '{}' (it takes it for the old OpenStep format), so a missing or empty one is written whole
+     if [ ! -s "$SETTINGS" ] || [ "$(tr -d ' \t\r\n' < "$SETTINGS")" = "{}" ]; then
+-        printf '{\n  "UseVirtualizationFramework" : false\n}\n' > "$SETTINGS"
++        printf '{\n  "EngineTypeMac" : "hyperkit",\n  "UseVirtualizationFramework" : false\n}\n' > "$SETTINGS"
+     else
+         plutil -replace UseVirtualizationFramework -bool NO "$SETTINGS"
++        plutil -replace EngineTypeMac -string hyperkit "$SETTINGS"     # Docker 4.99 chooses the VM engine with this key
+     fi
+     echo "installed: Docker Desktop in $APP now runs HyperKit through the shim"
+     echo "start it as usual (Launchpad, Dock, open -a Docker)"
 diff --git a/shim/hv_shim.c b/shim/hv_shim.c
-index 4156a0a..51c034e 100644
+index 4156a0a..030688b 100644
 --- a/shim/hv_shim.c
 +++ b/shim/hv_shim.c
-@@ -102,18 +102,26 @@ void rhv_shim_init(void)                 /* called by hijack.c, only in the proc
+@@ -102,18 +102,30 @@ void rhv_shim_init(void)                 /* called by hijack.c, only in the proc
  __attribute__((constructor)) static void rhv_shim_init(void)
  #endif
  {
 +    /*
 +     * The wrappers export DYLD_INSERT_LIBRARIES for the one process they start. Docker's backend is Docker.app's main
 +     * executable, so without this every process it starts (the UI, helpers, CLI plugins, credential helpers) would load
-+     * the shim too. The wrappers set the variable again for each HyperKit they start, so nothing that needs it loses it.
++     * the shim too, and everything those start. The backend's own copies keep it: it re-executes itself ("services",
++     * "fork"), and Docker 4.99 runs its hypervisor check in the "services" process. Any other process drops it here, so
++     * the shim reaches at most the processes the backend starts directly, not their children. The HyperKit wrapper sets
++     * the variable again for each HyperKit, so nothing that needs it loses it.
 +     */
-+    unsetenv("DYLD_INSERT_LIBRARIES");
++    if (strncmp(getprogname(), "com.docker.backend", 18) != 0)
++        unsetenv("DYLD_INSERT_LIBRARIES");
 +
      const char *v = getenv("RYZENHV_TRACE");
      g_trace = v && *v && *v != '0' ? atoi(v) : 0;      /* 1: every call, 2: only what is not routine I/O, CPUID, MMIO */

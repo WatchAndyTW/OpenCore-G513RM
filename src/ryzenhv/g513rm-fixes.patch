@@ -150,11 +150,20 @@ index 738ef90..4f45ed6 100644
          /* Self-check: the host state must be bit for bit what it was (this code uses no SSE of its own). */
          rhv::fpu::xsave(fScratchFpu.va, hostX);
 diff --git a/scripts/docker-desktop-shim.sh b/scripts/docker-desktop-shim.sh
-index 3fc7c12..7c962e4 100755
+index 3fc7c12..1de2e4b 100755
 --- a/scripts/docker-desktop-shim.sh
 +++ b/scripts/docker-desktop-shim.sh
-@@ -15,7 +15,8 @@
- #   MacOS/com.docker.backend.real            Docker's backend, moved (its signature stays valid)
+@@ -11,11 +11,15 @@
+ #   Resources/bin/com.docker.hyperkit.orig   untouched copy of Docker's HyperKit (what uninstall restores)
+ #   Resources/bin/com.docker.hyperkit.real   a copy of it, ad-hoc signed with only the hypervisor entitlement (the app sandbox
+ #                                            would keep it away from the RyzenHV kext)
+-#   Resources/bin/com.docker.hyperkit        a wrapper that starts the .real one with the shim loaded (DYLD_INSERT_LIBRARIES)
+-#   MacOS/com.docker.backend.real            Docker's backend, moved (its signature stays valid)
++#   Resources/bin/com.docker.hyperkit        a wrapper that starts the .real one with the shim loaded (DYLD_INSERT_LIBRARIES),
++#                                            and next to it ~/.ryzenhv/docker-fs-bridge.py: Docker 4.99 no longer serves
++#                                            host file sharing where HyperKit's guest looks for it, so without the bridge
++#                                            a container with a host bind mount hangs at start
++#   MacOS/com.docker.backend.real           Docker's backend, moved (its signature stays valid)
  #   MacOS/com.docker.backend                 a wrapper that starts it with the shim loaded: the backend refuses to start unless
  #                                            hv_vm_create() works
 -#   ~/Library/Group Containers/group.com.docker/settings-store.json   UseVirtualizationFramework=false (use HyperKit)
@@ -163,7 +172,26 @@ index 3fc7c12..7c962e4 100755
  # Two checks in HyperKit (v0.20210107-12-gadc4ea) are patched in memory by the shim, found by the bytes around them:
  #   1. HyperKit refuses a CPU whose CPUID vendor is not "GenuineIntel": that conditional jump becomes nops.
  #   2. HyperKit compares the guest linear address of an EPT violation with the one it computes from the instruction; AMD does
-@@ -75,7 +76,8 @@ EOF
+@@ -36,6 +40,7 @@ BACK_REAL="$BACK.real"
+ OWNER="$(id -un)"
+ OWNER_HOME="$(eval echo "~$OWNER")"
+ LIBDIR="$OWNER_HOME/.ryzenhv/lib"
++BRIDGE="$OWNER_HOME/.ryzenhv/docker-fs-bridge.py"
+ SETTINGS="$OWNER_HOME/Library/Group Containers/group.com.docker/settings-store.json"
+ 
+ is_script() { [ -e "$1" ] && head -c 2 "$1" | grep -q '#!'; }
+@@ -67,26 +72,38 @@ EOF
+     codesign --force --sign - --entitlements "$ENT" "$REAL" >/dev/null 2>&1
+     rm -f "$ENT"
+ 
+-    # --- the shim
++    # --- the shim, and the file-sharing bridge the HyperKit wrapper starts
+     mkdir -p "$LIBDIR"
+     cp "$SHIM" "$LIBDIR/libryzenhv.dylib"
++    cp "$HERE/scripts/docker-fs-bridge.py" "$BRIDGE"
++    chmod 755 "$BRIDGE"
+ 
+     # --- wrappers
      cat > "$WRAP" <<WRAP
  #!/bin/bash
  # RyzenHV wrapper, see scripts/docker-desktop-shim.sh in the ryzen-hypervisor repository.
@@ -172,10 +200,21 @@ index 3fc7c12..7c962e4 100755
 +unset DYLD_INSERT_LIBRARIES
  # A HyperKit that was killed leaves its pid file behind, and the next one then fails with "Failed to set up pidfile".
  prev=""
++vsock=""
  for a in "\$@"; do
-@@ -86,7 +88,8 @@ for a in "\$@"; do
+     if [ "\$prev" = "-F" ] && [ -f "\$a" ]; then
+         pid="\$(cat "\$a" 2>/dev/null)"
+         if [ -z "\$pid" ] || ! ps -p "\$pid" >/dev/null 2>&1; then rm -f "\$a"; fi
+     fi
++    case "\$a" in *virtio-sock*path=*) vsock="\${a##*path=}"; vsock="\${vsock%%,*}" ;; esac
      prev="\$a"
  done
++# Host file sharing: Docker 4.99 does not listen on HyperKit's socket for guest port 4099, so a container with a host bind
++# mount would hang at start. The bridge listens there and hands each connection to Docker's file server. It watches this
++# pid (HyperKit's, after the exec below) and exits with it; the subshell keeps it from becoming HyperKit's child.
++if [ -n "\$vsock" ] && [ -f "$BRIDGE" ]; then
++    ( /usr/bin/python3 "$BRIDGE" --pid \$\$ "\$vsock" </dev/null >>"$OWNER_HOME/.ryzenhv/fs-bridge.log" 2>&1 & )
++fi
  # HyperKit's own messages (Docker's log keeps only its exit code) also go to $OWNER_HOME/.ryzenhv/hyperkit.log
 -exec "\$(dirname "\$0")/com.docker.hyperkit.real" "\$@" 2> >(tee -a "$OWNER_HOME/.ryzenhv/hyperkit.log" >&2)
 +exec /usr/bin/env DYLD_INSERT_LIBRARIES="$LIBDIR/libryzenhv.dylib" "\$(dirname "\$0")/com.docker.hyperkit.real" "\$@" \\
@@ -183,7 +222,7 @@ index 3fc7c12..7c962e4 100755
  WRAP
      chmod 755 "$WRAP"
      if ! is_script "$BACK"; then
-@@ -104,9 +107,10 @@ WRAP
+@@ -104,9 +121,10 @@ WRAP
      mkdir -p "$(dirname "$SETTINGS")"
      # plutil cannot write a file that is just '{}' (it takes it for the old OpenStep format), so a missing or empty one is written whole
      if [ ! -s "$SETTINGS" ] || [ "$(tr -d ' \t\r\n' < "$SETTINGS")" = "{}" ]; then
@@ -195,6 +234,131 @@ index 3fc7c12..7c962e4 100755
      fi
      echo "installed: Docker Desktop in $APP now runs HyperKit through the shim"
      echo "start it as usual (Launchpad, Dock, open -a Docker)"
+@@ -124,7 +142,14 @@ uninstall)
+     echo "restored Docker's own HyperKit and backend (the UseVirtualizationFramework setting is left as it is)"
+     ;;
+ status)
+-    if is_script "$WRAP" && is_script "$BACK"; then echo "installed (HyperKit and backend wrapped)"
++    if is_script "$WRAP" && is_script "$BACK"; then
++        echo "installed (HyperKit and backend wrapped)"
++        if grep -q docker-fs-bridge "$WRAP" && [ -f "$BRIDGE" ]; then
++            if pgrep -f "$BRIDGE" >/dev/null; then echo "file-sharing bridge: running"
++            else echo "file-sharing bridge: installed, not running (it starts with Docker's VM)"; fi
++        else
++            echo "file-sharing bridge: missing, host bind mounts will hang: run install again"
++        fi
+     elif is_script "$WRAP" || is_script "$BACK"; then echo "half installed: run install again"
+     else echo "Docker's own files in place"; fi
+     ;;
+diff --git a/scripts/docker-fs-bridge.py b/scripts/docker-fs-bridge.py
+new file mode 100755
+index 0000000..7e206ed
+--- /dev/null
++++ b/scripts/docker-fs-bridge.py
+@@ -0,0 +1,103 @@
++#!/usr/bin/python3
++#
++# Host file sharing (bind mounts) for Docker Desktop on HyperKit, started by the HyperKit wrapper that
++# scripts/docker-desktop-shim.sh installs.
++#
++# The guest reaches Docker's file server on vsock port 4099. HyperKit turns a guest connection to host port P into a
++# connect() on the unix socket <vsock dir>/00000002.<P as 8 hex digits>, and Docker Desktop 4.99 no longer listens there
++# ("skipping unsupported fileserver listen address vsock:4099" in the backend's log). Its file server does take
++# connections on filesystem-fd.sock, as file descriptors. Without this bridge every access to a host path blocks in the
++# guest, so a container with a host bind mount never gets past "Starting".
++#
++#   docker-fs-bridge.py [--pid PID] <vsock dir>
++#
++# <vsock dir> is the path= of HyperKit's virtio-sock device (.../com.docker.docker/Data/vms/0). With --pid the bridge
++# exits when that process (HyperKit) is gone.
++import array
++import errno
++import os
++import signal
++import socket
++import sys
++import time
++
++PORT = 4099
++POLL_SECONDS = 2.0
++
++
++def log(msg):
++    print(time.strftime("%Y-%m-%d %H:%M:%S"), f"[{os.getpid()}]", msg, flush=True)
++
++
++def alive(pid):
++    try:
++        os.kill(pid, 0)
++    except OSError as e:
++        return e.errno == errno.EPERM
++    return True
++
++
++def hand_over(conn, target):
++    """Give the guest's connection to the file server: one byte with the descriptor attached (SCM_RIGHTS)."""
++    out = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++    try:
++        out.connect(target)
++        out.sendmsg([b"\0"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [conn.fileno()]))])
++    finally:
++        out.close()
++
++
++def main(argv):
++    pid = None
++    if len(argv) >= 2 and argv[0] == "--pid":
++        pid = int(argv[1])
++        argv = argv[2:]
++    if len(argv) != 1:
++        sys.exit("usage: docker-fs-bridge.py [--pid PID] <vsock dir>")
++    vsock = os.path.realpath(argv[0])
++    data = os.path.dirname(os.path.dirname(vsock))      # .../Data/vms/0 -> .../Data
++    # A unix socket address holds about 100 bytes on macOS, so both sockets are named relative to Docker's data directory.
++    os.chdir(data)
++    listen = os.path.join(os.path.relpath(vsock, data), "00000002.%08x" % PORT)
++    target = "filesystem-fd.sock"
++
++    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
++    try:
++        os.unlink(listen)                               # left by an earlier HyperKit; its bridge is gone or about to go
++    except FileNotFoundError:
++        pass
++    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++    srv.bind(listen)
++    inode = os.stat(listen).st_ino
++    srv.listen(64)
++    srv.settimeout(POLL_SECONDS)
++    log(f"listening on {os.path.join(data, listen)} for {'pid ' + str(pid) if pid else 'ever'}")
++    count = 0
++    try:
++        while True:
++            try:
++                conn, _ = srv.accept()
++            except socket.timeout:
++                if pid is not None and not alive(pid):
++                    log(f"pid {pid} is gone, exiting after {count} connection(s)")
++                    return
++                continue
++            count += 1
++            try:
++                hand_over(conn, target)
++                log(f"connection {count} handed to {target}")
++            except OSError as e:
++                log(f"connection {count} dropped, {target}: {e}")     # the guest dials again
++            finally:
++                conn.close()
++    finally:
++        srv.close()
++        try:
++            if os.stat(listen).st_ino == inode:         # not if a newer bridge has bound the name since
++                os.unlink(listen)
++        except OSError:
++            pass
++
++
++if __name__ == "__main__":
++    main(sys.argv[1:])
 diff --git a/shim/hv_shim.c b/shim/hv_shim.c
 index 4156a0a..030688b 100644
 --- a/shim/hv_shim.c

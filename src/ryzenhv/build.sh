@@ -16,6 +16,9 @@
 #   4. XSETBV is always intercepted and the host XCR0 is always restored after VMRUN (a guest could panic the host)
 #   5. the Docker installer also sets EngineTypeMac=hyperkit, the setting Docker 4.99 uses instead of
 #      UseVirtualizationFramework
+#   6. host file sharing: Docker 4.99 no longer listens on HyperKit's socket for guest port 4099, so a container with a
+#      host bind mount hung at start. scripts/docker-fs-bridge.py (new) hands those connections to Docker's file
+#      server; the installer copies it to ~/.ryzenhv and the HyperKit wrapper starts it with every VM
 # The shim (build/ryzenhv/build/libryzenhv.dylib) and rhv-info stay in build/; see docs/ryzenhv.md for Docker.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)

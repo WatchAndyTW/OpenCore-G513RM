@@ -4,8 +4,9 @@ macOS's Hypervisor.framework needs Intel VT-x, so on the 6900HX `kern.hv_support
 "Hypervisor check failed". RyzenHV is a kext that provides the same API on AMD's SVM. Docker's HyperKit uses it through
 a small library (the shim) loaded into HyperKit and Docker's backend.
 
-**Status: experimental. Works on this laptop** (macOS 26.7.2, Docker Desktop 4.99.0 build 245822, 2026-11-10):
-`docker run hello-world`, 16 vCPUs, 8 GB. Sleep/wake and long runs are not yet tested. A kernel bug here is a panic, so
+**Status: experimental. Works on this laptop** (macOS 26.7.2, Docker Desktop 4.99.0 build 245822, 2026-11-11):
+`docker run hello-world`, 16 vCPUs, 8 GB, and a compose stack with a host bind mount (through the file-sharing bridge,
+below). Sleep/wake and long runs are not yet tested. A kernel bug here is a panic, so
 keep the Pop!_OS fallback below in mind. Why it is set up this way, and what was patched:
 [ryzenhv-review.md](ryzenhv-review.md).
 
@@ -62,13 +63,35 @@ would replace it with 4.97.0.
 
    This wraps `com.docker.hyperkit` and `com.docker.backend` in Docker.app (Docker's originals are kept as `.orig` / `.real`),
    copies the shim to `~/.ryzenhv/lib/`, and sets `EngineTypeMac` to `hyperkit` so Docker uses HyperKit (4.99 ignores
-   the older `UseVirtualizationFramework`, which is set too).
-4. Start Docker, then `docker run --rm hello-world` (in a new terminal: `~/.docker/bin` is on PATH via `~/.zprofile`).
+   the older `UseVirtualizationFramework`, which is set too). It also copies the file-sharing bridge to
+   `~/.ryzenhv/docker-fs-bridge.py`; the HyperKit wrapper starts it.
+4. Start Docker, then `docker run --rm hello-world` (in a new terminal: `~/.docker/bin` is on PATH via `~/.zprofile`),
+   and `docker run --rm -v ~/macOS-G513RM/docs:/x:ro alpine ls /x` for a bind mount.
 
 The backend now logs to `com.docker.backend.real.log` and warns "cannot find executable path" at start; both come from
 the wrapper and are harmless.
 
-If it fails: `~/.ryzenhv/hyperkit.log`, `$R/rhv-info log`, and
+### File sharing (bind mounts)
+
+Docker's guest reaches the host's files through a file server in the backend, on vsock port 4099. With HyperKit that is
+the unix socket `vms/0/00000002.00001003` in `~/Library/Containers/com.docker.docker/Data`, and Docker 4.99 no longer
+listens there: the backend logs `skipping unsupported fileserver listen address vsock:4099`. Nothing fails, the guest
+just waits. A container with a host bind mount (`-v /some/host/path:...`, a compose `./dir:/app`) stays at "Starting"
+for ever, and `docker inspect` / `docker logs` on it hang too. Named volumes and containers without host paths are not
+affected, which is why `hello-world` worked.
+
+The bridge (`scripts/docker-fs-bridge.py` in the patch) listens on that socket and hands each connection to the file
+server's own `filesystem-fd.sock` as a file descriptor. The HyperKit wrapper starts it with every VM, it exits within
+2 s of HyperKit, and it logs to `~/.ryzenhv/fs-bridge.log`: one `listening` line per VM start and one
+`connection 1 handed to filesystem-fd.sock` about 10 s later. `docker-desktop-shim.sh status` says whether it runs.
+
+If a container hangs at "Starting": check `status` and that log. A bridge started by hand while Docker is up also
+works (`~/.ryzenhv/docker-fs-bridge.py ~/Library/Containers/com.docker.docker/Data/vms/0 &`), but the guest redials
+with a growing delay, so the hung commands can take up to 2 minutes to come back.
+
+### If Docker does not start
+
+Look at `~/.ryzenhv/hyperkit.log`, `$R/rhv-info log`, and
 `~/Library/Containers/com.docker.docker/Data/log/host/com.docker.backend.real.log`. "Hypervisor check failed" means
 the backend's `services` process did not get the shim (`vmmap <pid> | grep libryzenhv`). For a trace, create
 `~/.ryzenhv/debug` and start Docker with `open -a Docker --env RYZENHV_TRACE=2 --env RYZENHV_TRACE_FILE=/some/file`;
@@ -96,3 +119,7 @@ account. That's how Docker uses it, and it is acceptable only because this lapto
 
 The shim is loaded into Docker's backend processes, HyperKit, and the processes the backend starts directly (seen: the
 Docker Desktop UI's main process). Those drop it at once, so it goes no further down the tree.
+
+The file-sharing bridge runs as you, from `~/.ryzenhv` (writable by you, like the shim), without the shim loaded. It
+only passes the guest's connection on to Docker's own file server, so the guest can reach what Docker's file sharing
+normally lets it reach and nothing more.

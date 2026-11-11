@@ -14,6 +14,7 @@
 #   - finds the EFI partition that already holds OpenCore (or uses --esp), mounting it if needed
 #   - keeps your serial numbers: SystemSerialNumber / MLB / SystemUUID / ROM / SystemProductName are copied from the
 #     installed config.plist into the new one (the repo only has placeholders); a first install generates new ones
+#   - keeps your custom boot picker entries (Misc > Entries, e.g. a named Linux entry) from the installed config.plist
 #   - validates the result with ocvalidate before writing anything
 #   - saves the current EFI/OC as EFI/OC-backup on the EFI partition (for --restore, works from either OS) and as a
 #     dated copy in ~/G513RM-EFI-backups
@@ -91,6 +92,37 @@ for k in keys[:-1]:
     d = d[k]
 d[keys[-1]] = base64.b64decode(val) if kind == "data" else val
 plistlib.dump(c, open(p, "wb"))
+PY
+    fi
+}
+pcopy() {  # pcopy <from.plist> <to.plist> <key.path>: copy an array of string/boolean dictionaries; prints its length
+    if [ "$OS" = Darwin ]; then
+        local n j
+        n=$(plutil -extract "$3" raw -o - "$1" 2>/dev/null) || n=0
+        case "$n" in ''|*[!0-9]*) n=0;; esac
+        if [ "$n" -gt 0 ]; then
+            j=$(plutil -extract "$3" json -o - "$1")
+            plutil -replace "$3" -json "$j" "$2"
+        fi
+        echo "$n"
+    else
+        python3 -I - "$@" <<'PY'
+import plistlib, sys
+src, dst, path = sys.argv[1:4]
+def at(c, keys):
+    for k in keys:
+        c = c[k]
+    return c
+keys = path.split(".")
+try:
+    v = at(plistlib.load(open(src, "rb")), keys)
+except (KeyError, TypeError):
+    v = []
+if isinstance(v, list) and v:
+    c = plistlib.load(open(dst, "rb"))
+    at(c, keys[:-1])[keys[-1]] = v
+    plistlib.dump(c, open(dst, "wb"))
+print(len(v) if isinstance(v, list) else 0)
 PY
     fi
 }
@@ -254,6 +286,10 @@ pset "$NC" PlatformInfo.Generic.MLB string "$MLB"
 pset "$NC" PlatformInfo.Generic.SystemUUID string "$UUID"
 pset "$NC" PlatformInfo.Generic.ROM data "$ROM"
 pset "$NC" PlatformInfo.Generic.SystemProductName string "$MODEL"
+if [ -f "$CUR" ]; then
+    NENT=$(pcopy "$CUR" "$NC" Misc.Entries)
+    if [ "$NENT" -gt 0 ]; then say "Keeping the $NENT custom boot picker entr$([ "$NENT" = 1 ] && echo y || echo ies) of the installed config (Misc > Entries)."; fi
+fi
 [ "$OS" = Darwin ] && plutil -convert xml1 "$NC"
 
 step "Validating config.plist with ocvalidate"

@@ -75,6 +75,7 @@ Otherwise Windows hibernates instead of shutting down and leaves the Wi-Fi card 
    - finds the EFI partition that holds OpenCore and mounts it,
    - keeps your serial numbers (SystemSerialNumber, MLB, SystemUUID, ROM) from the installed config. The repo only
      has placeholders, and a first install generates new ones,
+   - keeps your custom boot picker entries (`Misc > Entries`) from the installed config,
    - validates the new `config.plist` with `ocvalidate`,
    - lists what will change and asks before writing,
    - saves the current `EFI/OC` to `EFI/OC-backup` on the EFI partition and to `~/G513RM-EFI-backups/`,

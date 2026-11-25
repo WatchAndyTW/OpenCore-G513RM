@@ -97,8 +97,23 @@ the backend's `services` process did not get the shim (`vmmap <pid> | grep libry
 `~/.ryzenhv/debug` and start Docker with `open -a Docker --env RYZENHV_TRACE=2 --env RYZENHV_TRACE_FILE=/some/file`;
 delete `~/.ryzenhv/debug` afterwards (tracing logs guest registers and costs CPU).
 
+## 4. Kiri (native mode)
+
+Kiri runs its VM through Apple's Virtualization.framework, which the shim can't reach, so it needs native mode.
+Native mode is switched on at runtime by root (no `rhv_hv=1`); it was tested 2026-11-25 on macOS 26.7.2 (`hvf-smoke`
+without the shim, `kiri boot`, the nixabe-sys Compose stack). `sudo scripts/ryzenhv-native-boot.sh install` adds a
+LaunchDaemon that does it at every boot from a root-owned copy of `rhv-info` in `/Library/PrivilegedHelperTools/ryzenhv`;
+re-run it after rebuilding. `scripts/ryzenhv-native-boot.sh status` shows the state.
+
+While native mode is on, any local process can create a VM (review findings 3 and 10). That was accepted for Kiri.
+
+**Never run Kiri's VM and Docker Desktop's at the same time.** The kext pins all guest RAM: Kiri's default 8 GiB plus
+Docker's 6 GiB froze this 16 GiB laptop (2026-11-25). Cap Kiri in its settings (4 GiB is enough for nixabe-sys), and
+fully quit one before starting the other.
+
 ## Undo
 
+- Kiri's native mode: `sudo scripts/ryzenhv-native-boot.sh uninstall`; it stays on until the next reboot.
 - Docker: quit it, `~/macOS-G513RM/build/ryzenhv/scripts/docker-desktop-shim.sh uninstall`, `rm -rf ~/.ryzenhv`, and copy
   the settings backup back.
 - Kext: set its `Kernel > Add` entry to `Enabled = false` (or remove it and the two boot-args), then reinstall the EFI.
@@ -108,7 +123,7 @@ delete `~/.ryzenhv/debug` afterwards (tracing logs guest registers and costs CPU
 
 - `rhv kext` / `rhv kext --native` or the RyzenHV app: they edit the live EFI partition directly, not this repo.
 - `rhv autostart install`: a root daemon under `/usr/local`, which your account owns, so any program could replace it.
-  Only native mode needs it.
+  For native mode at boot use `scripts/ryzenhv-native-boot.sh` (section 4).
 - The release archive (prebuilt kext and QEMU); `build.sh` builds from source.
 
 ## Still true after the patches
